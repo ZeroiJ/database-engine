@@ -9,7 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] - 2026-03-18
+
 ### Added
+
+#### UPDATE Statement
+- Modify existing rows with `UPDATE <table> SET <column> = <value> [WHERE <condition>]`
+- Supports all value types: INT, TEXT, FLOAT, BOOLEAN
+
+#### FLOAT and BOOLEAN Types
+- **FLOAT**: Decimal numbers (e.g., `3.14`, `99.9`)
+- **BOOLEAN**: True/false values (e.g., `TRUE`, `FALSE`)
+- Full parser support for numeric literals and boolean tokens
+
+#### Column Indexes
+- **CREATE INDEX**: `CREATE INDEX <name> ON <table> (<column>)`
+- **DROP INDEX**: `DROP INDEX <name>`
+- Enables faster lookups on specific columns
+
+#### B-Tree Depth Fix
+- Fixed `depth()` method to correctly calculate tree depth after many inserts
+- Previously returned 1 even after 50000 inserts
+- Now correctly reports depth (e.g., 15 for 50000 keys with t=2)
+
+#### Benchmark Command
+- Added `.bench N` REPL command to test B-Tree performance
+- Inserts N sequential keys and reports tree depth
+
+### Build Status
+
+- All code compiles without errors
+- 26 tests pass
+- 1 test ignored (edge case for key updates)
 
 #### Phase 1: The REPL Shell (Interactive Interface)
 

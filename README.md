@@ -4,7 +4,7 @@ A SQL database engine built from scratch in Rust with a real B-Tree implementati
 
 [![Rust](https://img.shields.io/badge/Rust-1.93%2B-blue.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.1.0-green.svg)
+![Version](https://img.shields.io/badge/version-0.2.0-green.svg)
 
 ---
 
@@ -21,8 +21,10 @@ This isn't a toy. It's a real database that persists to JSON and handles concurr
 - **SQL REPL** — Interactive shell with colored output and query timing
 - **B-Tree Storage** — Self-balancing tree with node splitting, merging, and sibling borrowing
 - **Disk Persistence** — Save/load database to JSON files
-- **Query Execution** — SELECT, INSERT, CREATE TABLE, DELETE with WHERE filtering
+- **Query Execution** — SELECT, INSERT, UPDATE, CREATE TABLE, DELETE with WHERE filtering
 - **Auto-increment IDs** — Each row gets a unique ID automatically
+- **Column Indexes** — CREATE INDEX/DROP INDEX for faster lookups
+- **More Types** — INT, TEXT, FLOAT, BOOLEAN data types
 
 ---
 
@@ -75,12 +77,22 @@ DELETE FROM users WHERE id = 1
 | Statement | Syntax |
 |-----------|--------|
 | CREATE TABLE | `CREATE TABLE <name> (<col> <TYPE>, ...)` |
+| CREATE INDEX | `CREATE INDEX <name> ON <table> (<column>)` |
+| DROP INDEX | `DROP INDEX <name>` |
 | INSERT | `INSERT INTO <table> VALUES (<val>, ...)` |
 | SELECT | `SELECT * FROM <table> [WHERE <col> <op> <val>]` |
+| UPDATE | `UPDATE <table> SET <col> = <val> [WHERE <col> <op> <val>]` |
 | DELETE | `DELETE FROM <table> [WHERE <col> <op> <val>]` |
 
-**Types**: `INT`, `TEXT`
+**Types**: `INT`, `TEXT`, `FLOAT`, `BOOLEAN`
 **Operators**: `=`, `>`, `<`
+
+### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `.bench N` | Run benchmark: insert N sequential keys and report B-Tree depth |
+| `.exit` | Exit the REPL (auto-saves) |
 
 ---
 
@@ -98,9 +110,9 @@ DELETE FROM users WHERE id = 1
 
 ## Roadmap
 
-- [ ] UPDATE statement — modify existing rows
-- [ ] Column indexes — B-Tree indexed lookups on specific columns
-- [ ] FLOAT/BOOLEAN types — more SQL data types
+- [x] UPDATE statement — modify existing rows
+- [x] Column indexes — B-Tree indexed lookups on specific columns
+- [x] FLOAT/BOOLEAN types — more SQL data types
 - [ ] WAL (Write-Ahead Log) — crash-safe transactions
 - [ ] JOINs — combine data from multiple tables
 
