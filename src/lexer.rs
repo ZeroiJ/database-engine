@@ -9,9 +9,14 @@ pub enum Token {
     Create,
     Table,
     Delete,
+    Update,
+    Set,
     From,
     Where,
     Values,
+    Index,
+    Drop,
+    On,
     Star,
     Comma,
     LParen,
@@ -21,6 +26,8 @@ pub enum Token {
     LessThan,
     Ident(String),
     Number(i64),
+    Float(f64),
+    Boolean(bool),
     String(String),
     Eof,
 }
@@ -36,8 +43,12 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
 
         if c.is_ascii_digit() {
-            let num = parse_number(&mut chars);
-            tokens.push(Token::Number(num));
+            let (num, is_float) = parse_number(&mut chars);
+            if is_float {
+                tokens.push(Token::Float(num));
+            } else {
+                tokens.push(Token::Number(num as i64));
+            }
             continue;
         }
 
@@ -56,9 +67,18 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 "create" => Token::Create,
                 "table" => Token::Table,
                 "delete" => Token::Delete,
+                "update" => Token::Update,
+                "set" => Token::Set,
                 "from" => Token::From,
                 "where" => Token::Where,
                 "values" => Token::Values,
+                "index" => Token::Index,
+                "drop" => Token::Drop,
+                "on" => Token::On,
+                "float" => Token::Ident(ident),
+                "boolean" => Token::Ident(ident),
+                "true" => Token::Boolean(true),
+                "false" => Token::Boolean(false),
                 _ => Token::Ident(ident),
             };
             tokens.push(kw);
@@ -86,17 +106,34 @@ pub fn tokenize(input: &str) -> Vec<Token> {
     tokens
 }
 
-fn parse_number(chars: &mut Peekable<Chars>) -> i64 {
-    let mut num = 0i64;
+fn parse_number(chars: &mut Peekable<Chars>) -> (f64, bool) {
+    let mut num = 0f64;
+    let mut has_dot = false;
+    let mut decimals = 0;
+
     while let Some(&c) = chars.peek() {
         if c.is_ascii_digit() {
-            num = num * 10 + (c as i64 - '0' as i64);
+            let digit = c as u8 - b'0';
+            num = num * 10.0 + (digit as f64);
+            if has_dot {
+                decimals += 1;
+            }
+            chars.next();
+        } else if c == '.' && !has_dot {
+            has_dot = true;
             chars.next();
         } else {
             break;
         }
     }
-    num
+
+    if has_dot {
+        for _ in 0..decimals {
+            num /= 10.0;
+        }
+    }
+
+    (num, has_dot)
 }
 
 fn parse_string(chars: &mut Peekable<Chars>) -> String {
@@ -160,6 +197,23 @@ mod tests {
                 Token::Comma,
                 Token::String("sujal".to_string()),
                 Token::RParen,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_update_set() {
+        let tokens = tokenize("UPDATE users SET name = 'alex'");
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Update,
+                Token::Ident("users".to_string()),
+                Token::Set,
+                Token::Ident("name".to_string()),
+                Token::Equals,
+                Token::String("alex".to_string()),
                 Token::Eof,
             ]
         );

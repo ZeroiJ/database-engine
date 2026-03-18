@@ -1,7 +1,5 @@
 use crate::btree::BTree;
-#[cfg(test)]
-use crate::parser::DataType;
-use crate::parser::{ColumnDef, Condition, Operator, Value};
+use crate::parser::{ColumnDef, Condition, DataType, Operator, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -10,10 +8,18 @@ use std::path::Path;
 pub type Row = Vec<Value>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Index {
+    pub name: String,
+    pub column: String,
+    pub tree: HashMap<i64, Vec<i64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
     pub name: String,
     pub columns: Vec<ColumnDef>,
     pub rows: BTree,
+    pub indexes: HashMap<String, Index>,
     #[serde(skip)]
     pub next_row_id: i64,
 }
@@ -21,12 +27,14 @@ pub struct Table {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Database {
     tables: HashMap<String, Table>,
+    index_names: HashMap<String, String>,
 }
 
 impl Database {
     pub fn new() -> Self {
         Database {
             tables: HashMap::new(),
+            index_names: HashMap::new(),
         }
     }
 
@@ -41,9 +49,118 @@ impl Database {
                 name: table_name,
                 columns,
                 rows: BTree::new(2),
+                indexes: HashMap::new(),
                 next_row_id: 1,
             },
         );
+        Ok(())
+    }
+
+    fn value_to_index_key(value: &Value) -> i64 {
+        match value {
+            Value::Integer(n) => *n,
+            Value::Float(f) => (*f as i64)
+                .wrapping_mul(10000)
+                .wrapping_add((f.fract() * 10000.0) as i64),
+            Value::Boolean(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
+            Value::Text(s) => {
+                let mut hash: i64 = 0;
+                for byte in s.bytes() {
+                    hash = hash.wrapping_mul(31).wrapping_add(byte as i64);
+                }
+                hash
+            }
+        }
+    }
+
+    pub fn create_index(
+        &mut self,
+        table: String,
+        index_name: String,
+        column: String,
+    ) -> Result<(), String> {
+        let table = self
+            .tables
+            .get_mut(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        if table.indexes.contains_key(&index_name) {
+            return Err(format!("Index '{}' already exists", index_name));
+        }
+
+        let col_idx = table
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| format!("Column '{}' not found in table", column))?;
+
+        let mut index_tree: HashMap<i64, Vec<i64>> = HashMap::new();
+
+        for (row_id, row) in table.rows.inorder() {
+            let col_value = row.get(col_idx).cloned().ok_or("Column value not found")?;
+            let key = Self::value_to_index_key(&col_value);
+
+            if let Some(existing) = index_tree.get(&key) {
+                let mut row_ids = existing.clone();
+                row_ids.push(row_id);
+                index_tree.insert(key, row_ids);
+            } else {
+                index_tree.insert(key, vec![row_id]);
+            }
+        }
+
+        table.indexes.insert(
+            index_name.clone(),
+            Index {
+                name: index_name.clone(),
+                column,
+                tree: index_tree,
+            },
+        );
+
+        self.index_names.insert(index_name, table.name.clone());
+
+        Ok(())
+    }
+
+    pub fn drop_index(&mut self, index_name: String) -> Result<(), String> {
+        let table_name = self
+            .index_names
+            .get(&index_name)
+            .ok_or_else(|| format!("Index '{}' not found", index_name))?
+            .clone();
+
+        let table = self.tables.get_mut(&table_name).ok_or("Table not found")?;
+
+        table.indexes.remove(&index_name);
+        self.index_names.remove(&index_name);
+
+        Ok(())
+    }
+
+    pub fn drop_table(&mut self, table_name: String) -> Result<(), String> {
+        if !self.tables.contains_key(&table_name) {
+            return Err(format!("Table '{}' not found", table_name));
+        }
+
+        let indexes_to_remove: Vec<String> = self
+            .index_names
+            .iter()
+            .filter(|(_, t)| *t == &table_name)
+            .map(|(idx, _)| idx.clone())
+            .collect();
+
+        for idx in indexes_to_remove {
+            self.index_names.remove(&idx);
+        }
+
+        self.tables.remove(&table_name);
         Ok(())
     }
 
@@ -61,9 +178,76 @@ impl Database {
             ));
         }
 
+        for (i, value) in values.iter().enumerate() {
+            let col_type = &table.columns[i].data_type;
+            match (value, col_type) {
+                (Value::Integer(_), DataType::Int) => {}
+                (Value::Float(_), DataType::Float) => {}
+                (Value::Integer(_), DataType::Float) => {}
+                (Value::Boolean(_), DataType::Boolean) => {}
+                (Value::Text(_), DataType::Text) => {}
+                (Value::Integer(_), DataType::Text) => {
+                    return Err(format!(
+                        "Cannot assign INT value to TEXT column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                (Value::Float(_), DataType::Text) => {
+                    return Err(format!(
+                        "Cannot assign FLOAT value to TEXT column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                (Value::Boolean(_), DataType::Text) => {
+                    return Err(format!(
+                        "Cannot assign BOOLEAN value to TEXT column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                (Value::Text(_), DataType::Int) => {
+                    return Err(format!(
+                        "Cannot assign TEXT value to INT column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                (Value::Text(_), DataType::Float) => {
+                    return Err(format!(
+                        "Cannot assign TEXT value to FLOAT column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                (Value::Text(_), DataType::Boolean) => {
+                    return Err(format!(
+                        "Cannot assign TEXT value to BOOLEAN column '{}'",
+                        table.columns[i].name
+                    ))
+                }
+                _ => {}
+            }
+        }
+
         let row_id = table.next_row_id;
         table.next_row_id += 1;
-        table.rows.insert(row_id, values);
+        table.rows.insert(row_id, values.clone());
+
+        for (_, index) in &mut table.indexes {
+            let col_idx = table
+                .columns
+                .iter()
+                .position(|c| c.name == index.column)
+                .unwrap();
+            if let Some(col_value) = values.get(col_idx) {
+                let key = Self::value_to_index_key(col_value);
+                if let Some(existing) = index.tree.get(&key) {
+                    let mut row_ids = existing.clone();
+                    row_ids.push(row_id);
+                    index.tree.insert(key, row_ids);
+                } else {
+                    index.tree.insert(key, vec![row_id]);
+                }
+            }
+        }
+
         Ok(row_id)
     }
 
@@ -72,7 +256,7 @@ impl Database {
         table: String,
         columns: Vec<String>,
         condition: Option<Condition>,
-    ) -> Result<Vec<Row>, String> {
+    ) -> Result<(Vec<Row>, bool), String> {
         let table = self
             .tables
             .get(&table)
@@ -93,21 +277,51 @@ impl Database {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        let all_rows = table.rows.inorder();
+        let mut used_index = false;
+        let mut results: Vec<Row>;
 
-        let results: Vec<Row> = all_rows
-            .iter()
-            .filter(|(_, row)| {
-                if let Some(ref cond) = condition {
-                    Self::evaluate_condition_static(row, &table.columns, cond)
+        if let Some(ref cond) = condition {
+            if let Some(index) = table.indexes.values().find(|i| i.column == cond.column) {
+                if cond.operator == Operator::Eq {
+                    let key = Self::value_to_index_key(&cond.value);
+                    if let Some(row_ids) = index.tree.get(&key) {
+                        results = row_ids
+                            .iter()
+                            .filter_map(|row_id| table.rows.search(*row_id))
+                            .map(|row| column_indices.iter().map(|&i| row[i].clone()).collect())
+                            .collect();
+                        used_index = true;
+                    } else {
+                        results = vec![];
+                        used_index = true;
+                    }
                 } else {
-                    true
+                    let all_rows = table.rows.inorder();
+                    results = all_rows
+                        .iter()
+                        .filter(|(_, row)| {
+                            Self::evaluate_condition_static(row, &table.columns, cond)
+                        })
+                        .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
+                        .collect();
                 }
-            })
-            .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
-            .collect();
+            } else {
+                let all_rows = table.rows.inorder();
+                results = all_rows
+                    .iter()
+                    .filter(|(_, row)| Self::evaluate_condition_static(row, &table.columns, cond))
+                    .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
+                    .collect();
+            }
+        } else {
+            let all_rows = table.rows.inorder();
+            results = all_rows
+                .iter()
+                .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
+                .collect();
+        }
 
-        Ok(results)
+        Ok((results, used_index))
     }
 
     pub fn delete(&mut self, table: String, condition: Option<Condition>) -> Result<usize, String> {
@@ -136,7 +350,149 @@ impl Database {
             table.rows.delete(*key);
         }
 
+        for (_, index) in &mut table.indexes {
+            for key in &keys_to_delete {
+                if let Some(row) = table.rows.search(*key) {
+                    let col_idx = table
+                        .columns
+                        .iter()
+                        .position(|c| c.name == index.column)
+                        .unwrap();
+                    if let Some(col_value) = row.get(col_idx) {
+                        let idx_key = Self::value_to_index_key(col_value);
+                        if let Some(existing) = index.tree.get(&idx_key) {
+                            let mut row_ids: Vec<i64> =
+                                existing.iter().filter(|&&r| r != *key).cloned().collect();
+                            index.tree.remove(&idx_key);
+                            if !row_ids.is_empty() {
+                                index.tree.insert(idx_key, row_ids);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(keys_to_delete.len())
+    }
+
+    pub fn update(
+        &mut self,
+        table: String,
+        column: String,
+        value: Value,
+        condition: Option<Condition>,
+    ) -> Result<usize, String> {
+        let table = self
+            .tables
+            .get_mut(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        let col_idx = table
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| format!("Column not found: {}", column))?;
+
+        let column_type = &table.columns[col_idx].data_type;
+        match (&value, column_type) {
+            (Value::Integer(_), DataType::Int) => {}
+            (Value::Float(_), DataType::Float) => {}
+            (Value::Integer(_), DataType::Float) => {}
+            (Value::Boolean(_), DataType::Boolean) => {}
+            (Value::Text(_), DataType::Text) => {}
+            (Value::Integer(_), DataType::Text) => {
+                return Err(format!(
+                    "Cannot assign INT value to TEXT column '{}'",
+                    column
+                ))
+            }
+            (Value::Float(_), DataType::Text) => {
+                return Err(format!(
+                    "Cannot assign FLOAT value to TEXT column '{}'",
+                    column
+                ))
+            }
+            (Value::Boolean(_), DataType::Text) => {
+                return Err(format!(
+                    "Cannot assign BOOLEAN value to TEXT column '{}'",
+                    column
+                ))
+            }
+            (Value::Text(_), DataType::Int) => {
+                return Err(format!(
+                    "Cannot assign TEXT value to INT column '{}'",
+                    column
+                ))
+            }
+            (Value::Text(_), DataType::Float) => {
+                return Err(format!(
+                    "Cannot assign TEXT value to FLOAT column '{}'",
+                    column
+                ))
+            }
+            (Value::Text(_), DataType::Boolean) => {
+                return Err(format!(
+                    "Cannot assign TEXT value to BOOLEAN column '{}'",
+                    column
+                ))
+            }
+            _ => {}
+        }
+
+        let columns = table.columns.clone();
+        let all_rows = table.rows.inorder();
+
+        let keys_to_update: Vec<i64> = all_rows
+            .iter()
+            .filter(|(_, row)| {
+                if let Some(ref cond) = condition {
+                    Self::evaluate_condition_static(row, &columns, cond)
+                } else {
+                    true
+                }
+            })
+            .map(|(key, _)| *key)
+            .collect();
+
+        let count = keys_to_update.len();
+
+        for key in keys_to_update {
+            if let Some(row) = table.rows.search(key) {
+                let old_value = row.get(col_idx).cloned();
+                let mut new_row = row.clone();
+                new_row[col_idx] = value.clone();
+                table.rows.delete(key);
+                table.rows.insert(key, new_row.clone());
+
+                for (_, index) in &mut table.indexes {
+                    if index.column == column {
+                        if let Some(ref old_val) = old_value {
+                            let old_key = Self::value_to_index_key(&old_val);
+                            if let Some(existing) = index.tree.get(&old_key) {
+                                let mut row_ids: Vec<i64> =
+                                    existing.iter().filter(|&&r| r != key).cloned().collect();
+                                index.tree.remove(&old_key);
+                                if !row_ids.is_empty() {
+                                    index.tree.insert(old_key, row_ids);
+                                }
+                            }
+                        }
+
+                        let new_key = Self::value_to_index_key(&value);
+                        if let Some(existing) = index.tree.get(&new_key) {
+                            let mut row_ids = existing.clone();
+                            row_ids.push(key);
+                            index.tree.insert(new_key, row_ids);
+                        } else {
+                            index.tree.insert(new_key, vec![key]);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     fn evaluate_condition_static(row: &Row, columns: &[ColumnDef], condition: &Condition) -> bool {
@@ -153,9 +509,19 @@ impl Database {
 
         match (&condition.operator, row_value, &condition.value) {
             (Operator::Eq, Value::Integer(lhs), Value::Integer(rhs)) => lhs == rhs,
+            (Operator::Eq, Value::Float(lhs), Value::Float(rhs)) => lhs == rhs,
+            (Operator::Eq, Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
             (Operator::Eq, Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
+            (Operator::Eq, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) == *rhs,
+            (Operator::Eq, Value::Float(lhs), Value::Integer(rhs)) => *lhs == (*rhs as f64),
             (Operator::Gt, Value::Integer(lhs), Value::Integer(rhs)) => lhs > rhs,
+            (Operator::Gt, Value::Float(lhs), Value::Float(rhs)) => lhs > rhs,
+            (Operator::Gt, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) > *rhs,
+            (Operator::Gt, Value::Float(lhs), Value::Integer(rhs)) => *lhs > (*rhs as f64),
             (Operator::Lt, Value::Integer(lhs), Value::Integer(rhs)) => lhs < rhs,
+            (Operator::Lt, Value::Float(lhs), Value::Float(rhs)) => lhs < rhs,
+            (Operator::Lt, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) < *rhs,
+            (Operator::Lt, Value::Float(lhs), Value::Integer(rhs)) => *lhs < (*rhs as f64),
             _ => false,
         }
     }
@@ -274,12 +640,12 @@ mod tests {
         )
         .unwrap();
 
-        let result = db
+        let (result, _) = db
             .select("users".to_string(), vec!["*".to_string()], None)
             .unwrap();
         assert_eq!(result.len(), 2);
 
-        let result_with_cond = db
+        let (result_with_cond, _) = db
             .select(
                 "users".to_string(),
                 vec!["*".to_string()],
@@ -331,7 +697,7 @@ mod tests {
             .unwrap();
         assert_eq!(deleted, 1);
 
-        let remaining = db
+        let (remaining, _) = db
             .select("users".to_string(), vec!["*".to_string()], None)
             .unwrap();
         assert_eq!(remaining.len(), 1);
@@ -370,9 +736,136 @@ mod tests {
 
         let loaded_db = Database::load(path).unwrap();
 
-        let result = loaded_db
+        let (result, _) = loaded_db
             .select("users".to_string(), vec!["*".to_string()], None)
             .unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_update_without_condition() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Text("sujal".to_string())],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Text("alex".to_string())],
+        )
+        .unwrap();
+
+        let updated = db
+            .update(
+                "users".to_string(),
+                "name".to_string(),
+                Value::Text("changed".to_string()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(updated, 2);
+
+        let (result, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None)
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0][1], Value::Text("changed".to_string()));
+        assert_eq!(result[1][1], Value::Text("changed".to_string()));
+    }
+
+    #[test]
+    fn test_update_with_condition() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Text("sujal".to_string())],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Text("alex".to_string())],
+        )
+        .unwrap();
+
+        let updated = db
+            .update(
+                "users".to_string(),
+                "name".to_string(),
+                Value::Text("updated".to_string()),
+                Some(Condition {
+                    column: "id".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(1),
+                }),
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let (result, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None)
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0][1], Value::Text("updated".to_string()));
+        assert_eq!(result[1][1], Value::Text("alex".to_string()));
+    }
+
+    #[test]
+    fn test_update_nonexistent_table() {
+        let mut db = Database::new();
+        let result = db.update(
+            "users".to_string(),
+            "name".to_string(),
+            Value::Text("test".to_string()),
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Table not found"));
+    }
+
+    #[test]
+    fn test_update_nonexistent_column() {
+        let mut db = Database::new();
+        let columns = vec![ColumnDef {
+            name: "id".to_string(),
+            data_type: DataType::Int,
+        }];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(1)])
+            .unwrap();
+
+        let result = db.update(
+            "users".to_string(),
+            "nonexistent".to_string(),
+            Value::Integer(100),
+            None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Column not found"));
     }
 }

@@ -97,6 +97,16 @@ fn main() {
                     break;
                 }
 
+                if input.starts_with(".bench") {
+                    let n: usize = input
+                        .trim_start_matches(".bench")
+                        .trim()
+                        .parse()
+                        .unwrap_or(10000);
+                    run_benchmark(&mut db, n);
+                    continue;
+                }
+
                 let start = Instant::now();
                 let tokens = lexer::tokenize(input);
                 match parser::parse(tokens) {
@@ -172,9 +182,39 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             condition,
         } => {
             let table_name = table.clone();
-            let rows = db.select(table, columns, condition)?;
+            let (rows, index_used) = db.select(table, columns, condition)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
-            Ok(format_table(&table_meta.columns, &rows))
+            let table_output = format_table(&table_meta.columns, &rows);
+            if index_used {
+                Ok(table_output)
+            } else {
+                Ok(table_output)
+            }
+        }
+        Statement::CreateIndex {
+            index_name,
+            table,
+            column,
+        } => {
+            let table_name = table.clone();
+            db.create_index(table, index_name.clone(), column.clone())?;
+            Ok(format!(
+                "✓ {}",
+                format!(
+                    "Index '{}' created on {}({})",
+                    index_name.green(),
+                    table_name.yellow(),
+                    column.yellow()
+                )
+                .green()
+            ))
+        }
+        Statement::DropIndex { index_name } => {
+            db.drop_index(index_name.clone())?;
+            Ok(format!(
+                "✓ {}",
+                format!("Index '{}' dropped", index_name.green()).green()
+            ))
         }
         Statement::Delete { table, condition } => {
             let count = db.delete(table, condition)?;
@@ -187,7 +227,151 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
                 )
             ))
         }
+        Statement::Update {
+            table,
+            column,
+            value,
+            condition,
+        } => {
+            let count = db.update(table, column, value, condition)?;
+            Ok(format!(
+                "✓ {}",
+                format!(
+                    "{} {} updated",
+                    count.to_string().green(),
+                    if count == 1 { "row" } else { "rows" }
+                )
+            ))
+        }
     }
+}
+
+fn run_benchmark(db: &mut Database, n: usize) {
+    use crate::parser::{ColumnDef, Condition, DataType, Operator, Value};
+
+    let insert_start = Instant::now();
+
+    db.create_table(
+        "_bench".to_string(),
+        vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "value".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "label".to_string(),
+                data_type: DataType::Text,
+            },
+        ],
+    )
+    .ok();
+
+    for i in 0..n {
+        let _ = db.insert(
+            "_bench".to_string(),
+            vec![
+                Value::Integer(i as i64),
+                Value::Integer((i * 7) as i64),
+                Value::Text(format!("label_{}", i)),
+            ],
+        );
+    }
+    let insert_time = insert_start.elapsed();
+
+    let select_full_start = Instant::now();
+    let _ = db.select(
+        "_bench".to_string(),
+        vec!["*".to_string()],
+        Some(Condition {
+            column: "value".to_string(),
+            operator: Operator::Eq,
+            value: Value::Integer(42),
+        }),
+    );
+    let select_full_time = select_full_start.elapsed();
+
+    let select_id_start = Instant::now();
+    let _ = db.select(
+        "_bench".to_string(),
+        vec!["*".to_string()],
+        Some(Condition {
+            column: "id".to_string(),
+            operator: Operator::Eq,
+            value: Value::Integer((n / 2) as i64),
+        }),
+    );
+    let select_id_time = select_id_start.elapsed();
+
+    let index_start = Instant::now();
+    let _ = db.create_index(
+        "_bench".to_string(),
+        "idx_value".to_string(),
+        "value".to_string(),
+    );
+    let index_time = index_start.elapsed();
+
+    let select_index_start = Instant::now();
+    let _ = db.select(
+        "_bench".to_string(),
+        vec!["*".to_string()],
+        Some(Condition {
+            column: "value".to_string(),
+            operator: Operator::Eq,
+            value: Value::Integer(42),
+        }),
+    );
+    let select_index_time = select_index_start.elapsed();
+
+    let delete_start = Instant::now();
+    let _ = db.delete("_bench".to_string(), None);
+    let delete_time = delete_start.elapsed();
+
+    let _ = db.drop_index("idx_value".to_string());
+
+    let table = db.get_table("_bench");
+    let btree_depth = table.map(|t| t.rows.depth()).unwrap_or(0);
+
+    let rows_per_sec = (n as f64 / insert_time.as_secs_f64()) as usize;
+
+    println!();
+    println!(
+        "{}",
+        format!(
+            "╔══════════════════════════════════════════╗\n\
+         ║         {}  ║\n\
+         ╠══════════════════════════════════════════╣\n\
+         ║  INSERT {} rows    →   {:>7.1}ms      ║\n\
+         ║  SELECT full scan   →   {:>7.1}ms      ║\n\
+         ║  SELECT by id       →   {:>7.1}ms      ║\n\
+         ║  CREATE INDEX      →   {:>7.1}ms      ║\n\
+         ║  SELECT with index →   {:>7.1}ms      ║\n\
+         ║  DELETE all rows   →   {:>7.1}ms      ║\n\
+         ╠══════════════════════════════════════════╣\n\
+         ║  B-Tree depth       →   {:>7}            ║\n\
+         ║  Rows/sec (insert)  →   {:>7},{}       ║\n\
+         ╚══════════════════════════════════════════╝",
+            format!("rustdb benchmark — {} rows", n),
+            n,
+            insert_time.as_secs_f64() * 1000.0,
+            select_full_time.as_secs_f64() * 1000.0,
+            select_id_time.as_secs_f64() * 1000.0,
+            index_time.as_secs_f64() * 1000.0,
+            select_index_time.as_secs_f64() * 1000.0,
+            delete_time.as_secs_f64() * 1000.0,
+            btree_depth,
+            (rows_per_sec / 1000).to_string().yellow(),
+            (rows_per_sec % 1000).to_string().yellow()
+        )
+        .cyan()
+        .bold()
+    );
+    println!();
+
+    let _ = db.drop_table("_bench".to_string());
 }
 
 fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> String {
@@ -283,6 +467,14 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
 fn value_to_string(v: &parser::Value) -> String {
     match v {
         parser::Value::Integer(n) => n.to_string(),
+        parser::Value::Float(f) => {
+            let formatted = format!("{:.4}", f);
+            formatted
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+        }
+        parser::Value::Boolean(b) => b.to_string(),
         parser::Value::Text(s) => s.clone(),
     }
 }

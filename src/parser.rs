@@ -20,6 +20,20 @@ pub enum Statement {
         table: String,
         condition: Option<Condition>,
     },
+    Update {
+        table: String,
+        column: String,
+        value: Value,
+        condition: Option<Condition>,
+    },
+    CreateIndex {
+        index_name: String,
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        index_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,6 +53,8 @@ pub enum Operator {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Integer(i64),
+    Float(f64),
+    Boolean(bool),
     Text(String),
 }
 
@@ -51,6 +67,8 @@ pub struct ColumnDef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
     Int,
+    Float,
+    Boolean,
     Text,
 }
 
@@ -60,8 +78,20 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     match tokens.next() {
         Some(Token::Select) => parse_select(&mut tokens),
         Some(Token::Insert) => parse_insert(&mut tokens),
-        Some(Token::Create) => parse_create_table(&mut tokens),
+        Some(Token::Create) => {
+            let next = tokens.peek();
+            match next {
+                Some(&Token::Table) => parse_create_table(&mut tokens),
+                Some(&Token::Index) => parse_create_index(&mut tokens),
+                _ => Err(format!(
+                    "Expected TABLE or INDEX after CREATE, got: {:?}",
+                    next
+                )),
+            }
+        }
         Some(Token::Delete) => parse_delete(&mut tokens),
+        Some(Token::Update) => parse_update(&mut tokens),
+        Some(Token::Drop) => parse_drop_index(&mut tokens),
         Some(tok) => Err(format!("Unrecognized statement start: {:?}", tok)),
         None => Err("Empty input".to_string()),
     }
@@ -139,6 +169,8 @@ fn parse_insert(
     loop {
         match tokens.next() {
             Some(Token::Number(n)) => values.push(Value::Integer(n)),
+            Some(Token::Float(f)) => values.push(Value::Float(f)),
+            Some(Token::Boolean(b)) => values.push(Value::Boolean(b)),
             Some(Token::String(s)) => values.push(Value::Text(s)),
             Some(Token::RParen) => break,
             Some(tok) => return Err(format!("Expected value or ), got: {:?}", tok)),
@@ -198,6 +230,8 @@ fn parse_create_table(
         let data_type = match tokens.next() {
             Some(Token::Ident(dt)) => match dt.to_lowercase().as_str() {
                 "int" => DataType::Int,
+                "float" => DataType::Float,
+                "boolean" => DataType::Boolean,
                 "text" => DataType::Text,
                 _ => return Err(format!("Unknown data type: {}", dt)),
             },
@@ -253,6 +287,62 @@ fn parse_delete(
     Ok(Statement::Delete { table, condition })
 }
 
+fn parse_update(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<Statement, String> {
+    let table = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected table name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::Set) => {}
+        Some(tok) => return Err(format!("Expected SET, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    }
+
+    let column = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected column name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::Equals) => {}
+        Some(tok) => return Err(format!("Expected =, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    }
+
+    let value = match tokens.next() {
+        Some(Token::Number(n)) => Value::Integer(n),
+        Some(Token::Float(f)) => Value::Float(f),
+        Some(Token::Boolean(b)) => Value::Boolean(b),
+        Some(Token::String(s)) => Value::Text(s),
+        Some(tok) => return Err(format!("Expected value, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    let condition = if let Some(&Token::Where) = tokens.peek() {
+        tokens.next();
+        Some(parse_condition(tokens)?)
+    } else {
+        None
+    };
+
+    match tokens.next() {
+        Some(Token::Eof) | None => {}
+        Some(tok) => return Err(format!("Unexpected token after statement: {:?}", tok)),
+    }
+
+    Ok(Statement::Update {
+        table,
+        column,
+        value,
+        condition,
+    })
+}
+
 fn parse_condition(
     tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
 ) -> Result<Condition, String> {
@@ -272,6 +362,8 @@ fn parse_condition(
 
     let value = match tokens.next() {
         Some(Token::Number(n)) => Value::Integer(n),
+        Some(Token::Float(f)) => Value::Float(f),
+        Some(Token::Boolean(b)) => Value::Boolean(b),
         Some(Token::String(s)) => Value::Text(s),
         Some(tok) => return Err(format!("Expected value, got: {:?}", tok)),
         None => return Err("Unexpected end of input".to_string()),
@@ -282,6 +374,78 @@ fn parse_condition(
         operator,
         value,
     })
+}
+
+fn parse_create_index(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<Statement, String> {
+    tokens.next();
+
+    let index_name = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected index name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::On) => {}
+        Some(tok) => return Err(format!("Expected ON, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    }
+
+    let table = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected table name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::LParen) => {}
+        Some(tok) => return Err(format!("Expected (, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    }
+
+    let column = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected column name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::RParen) => {}
+        Some(tok) => return Err(format!("Expected ), got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    }
+
+    match tokens.next() {
+        Some(Token::Eof) | None => {}
+        Some(tok) => return Err(format!("Unexpected token after statement: {:?}", tok)),
+    }
+
+    Ok(Statement::CreateIndex {
+        index_name,
+        table,
+        column,
+    })
+}
+
+fn parse_drop_index(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<Statement, String> {
+    tokens.next();
+
+    let index_name = match tokens.next() {
+        Some(Token::Ident(name)) => name,
+        Some(tok) => return Err(format!("Expected index name, got: {:?}", tok)),
+        None => return Err("Unexpected end of input".to_string()),
+    };
+
+    match tokens.next() {
+        Some(Token::Eof) | None => {}
+        Some(tok) => return Err(format!("Unexpected token after statement: {:?}", tok)),
+    }
+
+    Ok(Statement::DropIndex { index_name })
 }
 
 #[cfg(test)]
@@ -355,6 +519,42 @@ mod tests {
                     column: "age".to_string(),
                     operator: Operator::Gt,
                     value: Value::Integer(18),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn test_update_basic() {
+        let tokens = tokenize("UPDATE users SET name = 'alex'");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            Statement::Update {
+                table: "users".to_string(),
+                column: "name".to_string(),
+                value: Value::Text("alex".to_string()),
+                condition: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_update_with_where() {
+        let tokens = tokenize("UPDATE users SET name = 'alex' WHERE id = 1");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            Statement::Update {
+                table: "users".to_string(),
+                column: "name".to_string(),
+                value: Value::Text("alex".to_string()),
+                condition: Some(Condition {
+                    column: "id".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(1),
                 }),
             }
         );

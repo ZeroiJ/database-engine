@@ -178,10 +178,14 @@ impl BTree {
         }
         self.delete_from_tree(self.root, key);
 
-        // Handle root becoming empty
+        // Handle root becoming empty - promote first non-leaf child
         if self.nodes[self.root].keys.is_empty() && !self.nodes[self.root].leaf {
             if !self.nodes[self.root].children.is_empty() {
-                let new_root = self.nodes[self.root].children[0];
+                // Find first non-leaf child to promote
+                let mut new_root = self.nodes[self.root].children[0];
+                while self.nodes[new_root].leaf && !self.nodes[new_root].children.is_empty() {
+                    new_root = self.nodes[new_root].children[0];
+                }
                 self.nodes[self.root] = self.nodes[new_root].clone();
             }
         }
@@ -438,6 +442,28 @@ impl BTree {
             self.inorder_node(*node.children.last().unwrap(), result);
         }
     }
+
+    pub fn depth(&self) -> usize {
+        self.depth_node(self.root)
+    }
+
+    fn depth_node(&self, idx: usize) -> usize {
+        let node = &self.nodes[idx];
+        if node.leaf {
+            1
+        } else if node.children.is_empty() {
+            1
+        } else {
+            let mut max_child_depth = 0;
+            for &child_idx in &node.children {
+                let child_depth = self.depth_node(child_idx);
+                if child_depth > max_child_depth {
+                    max_child_depth = child_depth;
+                }
+            }
+            1 + max_child_depth
+        }
+    }
 }
 
 #[cfg(test)]
@@ -580,5 +606,14 @@ mod stress_tests {
         tree.delete(7);
         let keys: Vec<i64> = tree.inorder().iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec![0, 1, 2, 4, 5, 6, 8, 9]);
+    }
+
+    #[test]
+    fn test_depth_50k() {
+        let mut tree = BTree::new(2);
+        for i in 0..50000 {
+            tree.insert(i, vec![]);
+        }
+        println!("depth: {}", tree.depth());
     }
 }
