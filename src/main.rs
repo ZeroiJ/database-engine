@@ -9,9 +9,62 @@ mod btree;
 mod lexer;
 mod parser;
 mod storage;
+mod wal;
 
 use parser::Statement;
 use storage::Database;
+use wal::WalEntry;
+
+/// Get the WAL file path from the database path.
+fn wal_path(db_path: &str) -> String {
+    if db_path.ends_with(".json") {
+        format!("{}.wal", &db_path[..db_path.len() - 5])
+    } else {
+        format!("{}.wal", db_path)
+    }
+}
+
+/// Replay WAL entries since the last checkpoint against the database.
+fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
+    let entries = wal::read(wal_path)?;
+
+    // Find entries since last checkpoint (or all if no checkpoint)
+    let mut entries_to_replay: Vec<WalEntry> = Vec::new();
+    for entry in entries.into_iter().rev() {
+        if matches!(entry, WalEntry::Checkpoint) {
+            break;
+        }
+        entries_to_replay.push(entry);
+    }
+    entries_to_replay.reverse();
+
+    let count = entries_to_replay.len();
+
+    for entry in entries_to_replay {
+        match entry {
+            WalEntry::CreateTable { table, columns } => {
+                db.create_table(table, columns)?;
+            }
+            WalEntry::Insert { table, values } => {
+                db.insert(table, values)?;
+            }
+            WalEntry::Delete { table, condition } => {
+                db.delete(table, condition)?;
+            }
+            WalEntry::Update {
+                table,
+                column,
+                value,
+                condition,
+            } => {
+                db.update(table, column, value, condition)?;
+            }
+            WalEntry::Checkpoint => {}
+        }
+    }
+
+    Ok(count)
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -20,7 +73,10 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "rustdb.json".to_string());
 
+    let wal_path = wal_path(&db_path);
     let file_exists = Path::new(&db_path).exists();
+    let wal_exists = Path::new(&wal_path).exists();
+
     let mut db = match Database::load(&db_path) {
         Ok(loaded_db) => {
             if file_exists {
@@ -31,6 +87,37 @@ fn main() {
         }
         Err(_) => Database::new(),
     };
+
+    // WAL recovery
+    let mut wal_recovered = 0;
+    if wal_exists {
+        match replay_wal(&mut db, &wal_path) {
+            Ok(count) => {
+                if count > 0 {
+                    wal_recovered = count;
+                    // Save the recovered state to main DB
+                    if let Err(e) = db.save(&db_path) {
+                        eprintln!(
+                            "{} Failed to save recovered database: {}",
+                            "✗".red().bold(),
+                            e
+                        );
+                    }
+                    // Clear the WAL after successful recovery
+                    if let Err(e) = wal::clear(&wal_path) {
+                        eprintln!(
+                            "{} Failed to clear WAL after recovery: {}",
+                            "✗".red().bold(),
+                            e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("{} WAL recovery failed: {}", "✗".red().bold(), e);
+            }
+        }
+    }
 
     let table_count = db.table_count();
 
@@ -43,7 +130,7 @@ fn main() {
          ║   {}: {:<24} ║\n\
          ║   {}: {:<24} ║\n\
          ╚══════════════════════════════════════╝",
-            "rustdb v0.1.0 — by Sujal".cyan().bold(),
+            "rustdb v0.2.0 — by Sujal".cyan().bold(),
             "loaded".yellow(),
             db_path,
             "tables".green(),
@@ -52,6 +139,17 @@ fn main() {
     );
     if !file_exists {
         println!("{}", "  (new database)".dimmed());
+    }
+    if wal_recovered > 0 {
+        println!(
+            "{}",
+            format!(
+                "⚠ WAL recovery: replayed {} operation{}",
+                wal_recovered.to_string().yellow().bold(),
+                if wal_recovered == 1 { "" } else { "s" }
+            )
+            .yellow()
+        );
     }
     println!();
 
@@ -116,7 +214,67 @@ fn main() {
                             Statement::CreateTable { .. }
                                 | Statement::Insert { .. }
                                 | Statement::Delete { .. }
+                                | Statement::Update { .. }
+                                | Statement::CreateIndex { .. }
+                                | Statement::DropIndex { .. }
                         );
+
+                        // WAL: append entry before mutation
+                        if is_mutation {
+                            let wal_entry = match &stmt {
+                                Statement::CreateTable { table, columns } => {
+                                    WalEntry::CreateTable {
+                                        table: table.clone(),
+                                        columns: columns.clone(),
+                                    }
+                                }
+                                Statement::Insert { table, values } => WalEntry::Insert {
+                                    table: table.clone(),
+                                    values: values.clone(),
+                                },
+                                Statement::Delete { table, condition } => WalEntry::Delete {
+                                    table: table.clone(),
+                                    condition: condition.clone(),
+                                },
+                                Statement::Update {
+                                    table,
+                                    column,
+                                    value,
+                                    condition,
+                                } => WalEntry::Update {
+                                    table: table.clone(),
+                                    column: column.clone(),
+                                    value: value.clone(),
+                                    condition: condition.clone(),
+                                },
+                                Statement::CreateIndex {
+                                    index_name,
+                                    table: _,
+                                    column: _,
+                                } => {
+                                    // Indexes are part of the database save, include in WAL
+                                    // by treating as a note - we don't have a specific CreateIndex WAL entry
+                                    // so we include it in the checkpoint logic
+                                    WalEntry::CreateTable {
+                                        table: format!("__index__{}", index_name),
+                                        columns: vec![],
+                                    }
+                                }
+                                Statement::DropIndex { index_name } => WalEntry::Delete {
+                                    table: format!("__index__{}", index_name),
+                                    condition: None,
+                                },
+                                _ => panic!("Unexpected non-mutation statement"),
+                            };
+
+                            if let Err(e) = wal::append(&wal_path, &wal_entry) {
+                                println!(
+                                    "{} {}",
+                                    "⚠".yellow().bold(),
+                                    format!("WAL append failed: {}", e).yellow()
+                                );
+                            }
+                        }
 
                         match execute(&mut db, stmt) {
                             Ok(result) => {
@@ -129,6 +287,17 @@ fn main() {
                                             "✗".red().bold(),
                                             format!("Error auto-saving: {}", e).red()
                                         );
+                                    } else {
+                                        // WAL: append checkpoint after successful save
+                                        if let Err(e) =
+                                            wal::append(&wal_path, &WalEntry::Checkpoint)
+                                        {
+                                            println!(
+                                                "{} {}",
+                                                "⚠".yellow().bold(),
+                                                format!("WAL checkpoint failed: {}", e).yellow()
+                                            );
+                                        }
                                     }
                                 }
                                 println!(
@@ -247,7 +416,7 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
 }
 
 fn run_benchmark(db: &mut Database, n: usize) {
-    use crate::parser::{ColumnDef, Condition, DataType, Operator, Value};
+    use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
 
     let insert_start = Instant::now();
 
@@ -286,11 +455,11 @@ fn run_benchmark(db: &mut Database, n: usize) {
     let _ = db.select(
         "_bench".to_string(),
         vec!["*".to_string()],
-        Some(Condition {
+        Some(WhereClause::Single(Condition {
             column: "value".to_string(),
             operator: Operator::Eq,
             value: Value::Integer(42),
-        }),
+        })),
     );
     let select_full_time = select_full_start.elapsed();
 
@@ -298,11 +467,11 @@ fn run_benchmark(db: &mut Database, n: usize) {
     let _ = db.select(
         "_bench".to_string(),
         vec!["*".to_string()],
-        Some(Condition {
+        Some(WhereClause::Single(Condition {
             column: "id".to_string(),
             operator: Operator::Eq,
             value: Value::Integer((n / 2) as i64),
-        }),
+        })),
     );
     let select_id_time = select_id_start.elapsed();
 
@@ -318,11 +487,11 @@ fn run_benchmark(db: &mut Database, n: usize) {
     let _ = db.select(
         "_bench".to_string(),
         vec!["*".to_string()],
-        Some(Condition {
+        Some(WhereClause::Single(Condition {
             column: "value".to_string(),
             operator: Operator::Eq,
             value: Value::Integer(42),
-        }),
+        })),
     );
     let select_index_time = select_index_start.elapsed();
 

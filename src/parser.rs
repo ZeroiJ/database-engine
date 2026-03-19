@@ -6,7 +6,7 @@ pub enum Statement {
     Select {
         table: String,
         columns: Vec<String>,
-        condition: Option<Condition>,
+        condition: Option<WhereClause>,
     },
     Insert {
         table: String,
@@ -18,13 +18,13 @@ pub enum Statement {
     },
     Delete {
         table: String,
-        condition: Option<Condition>,
+        condition: Option<WhereClause>,
     },
     Update {
         table: String,
         column: String,
         value: Value,
-        condition: Option<Condition>,
+        condition: Option<WhereClause>,
     },
     CreateIndex {
         index_name: String,
@@ -70,6 +70,13 @@ pub enum DataType {
     Float,
     Boolean,
     Text,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WhereClause {
+    Single(Condition),
+    And(Box<WhereClause>, Box<WhereClause>),
+    Or(Box<WhereClause>, Box<WhereClause>),
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
@@ -121,7 +128,7 @@ fn parse_select(
 
     let condition = if let Some(&Token::Where) = tokens.peek() {
         tokens.next();
-        Some(parse_condition(tokens)?)
+        Some(parse_where_clause(tokens)?)
     } else {
         None
     };
@@ -274,7 +281,7 @@ fn parse_delete(
 
     let condition = if let Some(&Token::Where) = tokens.peek() {
         tokens.next();
-        Some(parse_condition(tokens)?)
+        Some(parse_where_clause(tokens)?)
     } else {
         None
     };
@@ -325,7 +332,7 @@ fn parse_update(
 
     let condition = if let Some(&Token::Where) = tokens.peek() {
         tokens.next();
-        Some(parse_condition(tokens)?)
+        Some(parse_where_clause(tokens)?)
     } else {
         None
     };
@@ -374,6 +381,51 @@ fn parse_condition(
         operator,
         value,
     })
+}
+
+// WHERE clause with precedence: AND higher than OR
+fn parse_where_clause(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<WhereClause, String> {
+    parse_or_expression(tokens)
+}
+
+fn parse_or_expression(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<WhereClause, String> {
+    let mut left = parse_and_expression(tokens)?;
+
+    while let Some(token) = tokens.peek() {
+        match token {
+            Token::Or => {
+                tokens.next();
+                let right = parse_and_expression(tokens)?;
+                left = WhereClause::Or(Box::new(left), Box::new(right));
+            }
+            _ => break,
+        }
+    }
+
+    Ok(left)
+}
+
+fn parse_and_expression(
+    tokens: &mut std::iter::Peekable<std::vec::IntoIter<Token>>,
+) -> Result<WhereClause, String> {
+    let mut left = WhereClause::Single(parse_condition(tokens)?);
+
+    while let Some(token) = tokens.peek() {
+        match token {
+            Token::And => {
+                tokens.next();
+                let right = WhereClause::Single(parse_condition(tokens)?);
+                left = WhereClause::And(Box::new(left), Box::new(right));
+            }
+            _ => break,
+        }
+    }
+
+    Ok(left)
 }
 
 fn parse_create_index(
@@ -515,11 +567,11 @@ mod tests {
             Statement::Select {
                 table: "users".to_string(),
                 columns: vec!["*".to_string()],
-                condition: Some(Condition {
+                condition: Some(WhereClause::Single(Condition {
                     column: "age".to_string(),
                     operator: Operator::Gt,
                     value: Value::Integer(18),
-                }),
+                })),
             }
         );
     }
@@ -551,12 +603,27 @@ mod tests {
                 table: "users".to_string(),
                 column: "name".to_string(),
                 value: Value::Text("alex".to_string()),
-                condition: Some(Condition {
+                condition: Some(WhereClause::Single(Condition {
                     column: "id".to_string(),
                     operator: Operator::Eq,
                     value: Value::Integer(1),
-                }),
+                })),
             }
         );
+    }
+
+    #[test]
+    fn test_where_and_precedence() {
+        let tokens = tokenize("SELECT * FROM users WHERE age > 18 AND active = true OR id = 1");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        // We don't fully pattern-match the tree here, but we ensure it parses without error.
+    }
+
+    #[test]
+    fn test_where_or_chain() {
+        let tokens = tokenize("SELECT * FROM users WHERE a = 1 OR b = 2 OR c = 3");
+        let result = parse(tokens);
+        assert!(result.is_ok());
     }
 }

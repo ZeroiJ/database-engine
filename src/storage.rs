@@ -1,5 +1,5 @@
 use crate::btree::BTree;
-use crate::parser::{ColumnDef, Condition, DataType, Operator, Value};
+use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -255,7 +255,7 @@ impl Database {
         &self,
         table: String,
         columns: Vec<String>,
-        condition: Option<Condition>,
+        condition: Option<WhereClause>,
     ) -> Result<(Vec<Row>, bool), String> {
         let table = self
             .tables
@@ -278,29 +278,47 @@ impl Database {
         };
 
         let mut used_index = false;
-        let mut results: Vec<Row>;
+        let results: Vec<Row>;
 
-        if let Some(ref cond) = condition {
-            if let Some(index) = table.indexes.values().find(|i| i.column == cond.column) {
-                if cond.operator == Operator::Eq {
-                    let key = Self::value_to_index_key(&cond.value);
-                    if let Some(row_ids) = index.tree.get(&key) {
-                        results = row_ids
-                            .iter()
-                            .filter_map(|row_id| table.rows.search(*row_id))
-                            .map(|row| column_indices.iter().map(|&i| row[i].clone()).collect())
-                            .collect();
-                        used_index = true;
+        if let Some(ref where_clause) = condition {
+            // Try to use an index only for simple equality conditions on an indexed column
+            if let Some(simple_cond) = Self::extract_simple_index_condition(where_clause) {
+                if let Some(index) = table
+                    .indexes
+                    .values()
+                    .find(|i| i.column == simple_cond.column)
+                {
+                    if simple_cond.operator == Operator::Eq {
+                        let key = Self::value_to_index_key(&simple_cond.value);
+                        if let Some(row_ids) = index.tree.get(&key) {
+                            results = row_ids
+                                .iter()
+                                .filter_map(|row_id| table.rows.search(*row_id))
+                                .map(|row| column_indices.iter().map(|&i| row[i].clone()).collect())
+                                .collect();
+                            used_index = true;
+                        } else {
+                            results = vec![];
+                            used_index = true;
+                        }
                     } else {
-                        results = vec![];
-                        used_index = true;
+                        let all_rows = table.rows.inorder();
+                        results = all_rows
+                            .iter()
+                            .filter(|(_, row)| {
+                                Self::evaluate_where_static(row, &table.columns, where_clause)
+                            })
+                            .map(|(_, row)| {
+                                column_indices.iter().map(|&i| row[i].clone()).collect()
+                            })
+                            .collect();
                     }
                 } else {
                     let all_rows = table.rows.inorder();
                     results = all_rows
                         .iter()
                         .filter(|(_, row)| {
-                            Self::evaluate_condition_static(row, &table.columns, cond)
+                            Self::evaluate_where_static(row, &table.columns, where_clause)
                         })
                         .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
                         .collect();
@@ -309,7 +327,9 @@ impl Database {
                 let all_rows = table.rows.inorder();
                 results = all_rows
                     .iter()
-                    .filter(|(_, row)| Self::evaluate_condition_static(row, &table.columns, cond))
+                    .filter(|(_, row)| {
+                        Self::evaluate_where_static(row, &table.columns, where_clause)
+                    })
                     .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
                     .collect();
             }
@@ -324,7 +344,11 @@ impl Database {
         Ok((results, used_index))
     }
 
-    pub fn delete(&mut self, table: String, condition: Option<Condition>) -> Result<usize, String> {
+    pub fn delete(
+        &mut self,
+        table: String,
+        condition: Option<WhereClause>,
+    ) -> Result<usize, String> {
         let table = self
             .tables
             .get_mut(&table)
@@ -338,7 +362,7 @@ impl Database {
             .iter()
             .filter(|(_, row)| {
                 if let Some(ref cond) = condition {
-                    Self::evaluate_condition_static(row, &columns, cond)
+                    Self::evaluate_where_static(row, &columns, cond)
                 } else {
                     true
                 }
@@ -361,7 +385,7 @@ impl Database {
                     if let Some(col_value) = row.get(col_idx) {
                         let idx_key = Self::value_to_index_key(col_value);
                         if let Some(existing) = index.tree.get(&idx_key) {
-                            let mut row_ids: Vec<i64> =
+                            let row_ids: Vec<i64> =
                                 existing.iter().filter(|&&r| r != *key).cloned().collect();
                             index.tree.remove(&idx_key);
                             if !row_ids.is_empty() {
@@ -381,7 +405,7 @@ impl Database {
         table: String,
         column: String,
         value: Value,
-        condition: Option<Condition>,
+        condition: Option<WhereClause>,
     ) -> Result<usize, String> {
         let table = self
             .tables
@@ -447,7 +471,7 @@ impl Database {
             .iter()
             .filter(|(_, row)| {
                 if let Some(ref cond) = condition {
-                    Self::evaluate_condition_static(row, &columns, cond)
+                    Self::evaluate_where_static(row, &columns, cond)
                 } else {
                     true
                 }
@@ -470,7 +494,7 @@ impl Database {
                         if let Some(ref old_val) = old_value {
                             let old_key = Self::value_to_index_key(&old_val);
                             if let Some(existing) = index.tree.get(&old_key) {
-                                let mut row_ids: Vec<i64> =
+                                let row_ids: Vec<i64> =
                                     existing.iter().filter(|&&r| r != key).cloned().collect();
                                 index.tree.remove(&old_key);
                                 if !row_ids.is_empty() {
@@ -523,6 +547,27 @@ impl Database {
             (Operator::Lt, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) < *rhs,
             (Operator::Lt, Value::Float(lhs), Value::Integer(rhs)) => *lhs < (*rhs as f64),
             _ => false,
+        }
+    }
+
+    fn evaluate_where_static(row: &Row, columns: &[ColumnDef], where_clause: &WhereClause) -> bool {
+        match where_clause {
+            WhereClause::Single(cond) => Self::evaluate_condition_static(row, columns, cond),
+            WhereClause::And(left, right) => {
+                Self::evaluate_where_static(row, columns, left)
+                    && Self::evaluate_where_static(row, columns, right)
+            }
+            WhereClause::Or(left, right) => {
+                Self::evaluate_where_static(row, columns, left)
+                    || Self::evaluate_where_static(row, columns, right)
+            }
+        }
+    }
+
+    fn extract_simple_index_condition(where_clause: &WhereClause) -> Option<Condition> {
+        match where_clause {
+            WhereClause::Single(cond) => Some(cond.clone()),
+            _ => None,
         }
     }
 
@@ -649,14 +694,92 @@ mod tests {
             .select(
                 "users".to_string(),
                 vec!["*".to_string()],
-                Some(Condition {
+                Some(WhereClause::Single(Condition {
                     column: "id".to_string(),
                     operator: Operator::Gt,
                     value: Value::Integer(1),
-                }),
+                })),
             )
             .unwrap();
         assert_eq!(result_with_cond.len(), 1);
+    }
+
+    #[test]
+    fn test_select_and_or_where_clauses() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "active".to_string(),
+                data_type: DataType::Boolean,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Integer(20), Value::Boolean(true)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Integer(16), Value::Boolean(true)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(3), Value::Integer(25), Value::Boolean(false)],
+        )
+        .unwrap();
+
+        // SELECT * FROM users WHERE age > 18 AND active = true
+        let (res_and, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::And(
+                    Box::new(WhereClause::Single(Condition {
+                        column: "age".to_string(),
+                        operator: Operator::Gt,
+                        value: Value::Integer(18),
+                    })),
+                    Box::new(WhereClause::Single(Condition {
+                        column: "active".to_string(),
+                        operator: Operator::Eq,
+                        value: Value::Boolean(true),
+                    })),
+                )),
+            )
+            .unwrap();
+        assert_eq!(res_and.len(), 1);
+
+        // SELECT * FROM users WHERE id = 1 OR id = 3
+        let (res_or, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Or(
+                    Box::new(WhereClause::Single(Condition {
+                        column: "id".to_string(),
+                        operator: Operator::Eq,
+                        value: Value::Integer(1),
+                    })),
+                    Box::new(WhereClause::Single(Condition {
+                        column: "id".to_string(),
+                        operator: Operator::Eq,
+                        value: Value::Integer(3),
+                    })),
+                )),
+            )
+            .unwrap();
+        assert_eq!(res_or.len(), 2);
     }
 
     #[test]
@@ -688,14 +811,75 @@ mod tests {
         let deleted = db
             .delete(
                 "users".to_string(),
-                Some(Condition {
+                Some(WhereClause::Single(Condition {
                     column: "id".to_string(),
                     operator: Operator::Eq,
                     value: Value::Integer(1),
-                }),
+                })),
             )
             .unwrap();
         assert_eq!(deleted, 1);
+
+        let (remaining, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_and_or_where() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "active".to_string(),
+                data_type: DataType::Boolean,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Integer(17), Value::Boolean(true)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Integer(25), Value::Boolean(false)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(3), Value::Integer(30), Value::Boolean(true)],
+        )
+        .unwrap();
+
+        // DELETE FROM users WHERE age < 18 OR active = false
+        let deleted = db
+            .delete(
+                "users".to_string(),
+                Some(WhereClause::Or(
+                    Box::new(WhereClause::Single(Condition {
+                        column: "age".to_string(),
+                        operator: Operator::Lt,
+                        value: Value::Integer(18),
+                    })),
+                    Box::new(WhereClause::Single(Condition {
+                        column: "active".to_string(),
+                        operator: Operator::Eq,
+                        value: Value::Boolean(false),
+                    })),
+                )),
+            )
+            .unwrap();
+        assert_eq!(deleted, 2);
 
         let (remaining, _) = db
             .select("users".to_string(), vec!["*".to_string()], None)
@@ -817,11 +1001,11 @@ mod tests {
                 "users".to_string(),
                 "name".to_string(),
                 Value::Text("updated".to_string()),
-                Some(Condition {
+                Some(WhereClause::Single(Condition {
                     column: "id".to_string(),
                     operator: Operator::Eq,
                     value: Value::Integer(1),
-                }),
+                })),
             )
             .unwrap();
         assert_eq!(updated, 1);
@@ -832,6 +1016,80 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0][1], Value::Text("updated".to_string()));
         assert_eq!(result[1][1], Value::Text("alex".to_string()));
+    }
+
+    #[test]
+    fn test_update_and_where_clause() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+            ColumnDef {
+                name: "active".to_string(),
+                data_type: DataType::Boolean,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Integer(25),
+                Value::Text("sujal".to_string()),
+                Value::Boolean(true),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Integer(30),
+                Value::Text("alex".to_string()),
+                Value::Boolean(true),
+            ],
+        )
+        .unwrap();
+
+        // UPDATE users SET active = false WHERE age > 18 AND name = 'sujal'
+        let updated = db
+            .update(
+                "users".to_string(),
+                "active".to_string(),
+                Value::Boolean(false),
+                Some(WhereClause::And(
+                    Box::new(WhereClause::Single(Condition {
+                        column: "age".to_string(),
+                        operator: Operator::Gt,
+                        value: Value::Integer(18),
+                    })),
+                    Box::new(WhereClause::Single(Condition {
+                        column: "name".to_string(),
+                        operator: Operator::Eq,
+                        value: Value::Text("sujal".to_string()),
+                    })),
+                )),
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let (result, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None)
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0][3], Value::Boolean(false));
+        assert_eq!(result[1][3], Value::Boolean(true));
     }
 
     #[test]
