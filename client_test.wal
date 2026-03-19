@@ -1,0 +1,2 @@
+{"CreateTable":{"table":"test","columns":[{"name":"id","data_type":"Int"},{"name":"name","data_type":"Text"}]}}
+"Checkpoint"

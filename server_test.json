@@ -1,0 +1,31 @@
+{
+  "tables": {
+    "test": {
+      "name": "test",
+      "columns": [
+        {
+          "name": "id",
+          "data_type": "Int"
+        },
+        {
+          "name": "name",
+          "data_type": "Text"
+        }
+      ],
+      "rows": {
+        "nodes": [
+          {
+            "keys": [],
+            "values": [],
+            "children": [],
+            "leaf": true
+          }
+        ],
+        "root": 0,
+        "t": 2
+      },
+      "indexes": {}
+    }
+  },
+  "index_names": {}
+}

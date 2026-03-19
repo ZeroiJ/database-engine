@@ -23,6 +23,14 @@ pub enum WalEntry {
         table: String,
         columns: Vec<ColumnDef>,
     },
+    CreateIndex {
+        index_name: String,
+        table: String,
+        column: String,
+    },
+    DropIndex {
+        index_name: String,
+    },
     Checkpoint,
 }
 

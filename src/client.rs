@@ -90,12 +90,10 @@ fn main() {
                             return;
                         }
                         Ok(_) => {
-                            if line.ends_with('\n') {
-                                response.push_str(&line);
+                            if line.trim() == "--END--" {
                                 break;
-                            } else {
-                                response.push_str(&line);
                             }
+                            response.push_str(&line);
                         }
                         Err(e) => {
                             eprintln!("{}", format!("✗ Read error: {}", e).red());

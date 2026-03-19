@@ -10,7 +10,10 @@ use std::net::TcpListener;
 use std::path::Path;
 
 pub fn start(db_path: String, port: u16) {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|_| {
+        eprintln!("{}", format!("✗ Port {} is already in use", port).red());
+        std::process::exit(1);
+    });
     println!(
         "{}",
         format!("rustdb server listening on port {}", port)
@@ -18,7 +21,10 @@ pub fn start(db_path: String, port: u16) {
             .bold()
     );
 
-    let mut db = Database::load(&db_path).unwrap();
+    let mut db = Database::load(&db_path).unwrap_or_else(|e| {
+        eprintln!("{}", format!("✗ Failed to load database: {}", e).red());
+        std::process::exit(1);
+    });
     let wal_path = crate::wal_path(&db_path);
 
     if Path::new(&wal_path).exists() {
@@ -64,19 +70,19 @@ pub fn start(db_path: String, port: u16) {
                     }
 
                     if input == ".exit" {
-                        stream.write_all(b"bye\n").ok();
+                        stream.write_all(b"bye\n--END--\n").ok();
                         break;
                     }
 
                     if input == ".quit" {
-                        stream.write_all(b"shutting down server\n").ok();
+                        stream.write_all(b"shutting down server\n--END--\n").ok();
                         println!("{}", "← server shutting down".yellow());
                         return;
                     }
 
                     if input.starts_with(".bench") {
                         stream
-                            .write_all(b"bench not supported in server mode\n")
+                            .write_all(b"bench not supported in server mode\n--END--\n")
                             .ok();
                         continue;
                     }
@@ -90,6 +96,8 @@ pub fn start(db_path: String, port: u16) {
                                     | Statement::Insert { .. }
                                     | Statement::Delete { .. }
                                     | Statement::Update { .. }
+                                    | Statement::CreateIndex { .. }
+                                    | Statement::DropIndex { .. }
                             );
 
                             if is_mutation {
@@ -119,7 +127,19 @@ pub fn start(db_path: String, port: u16) {
                                         value: value.clone(),
                                         condition: condition.clone(),
                                     },
-                                    _ => panic!("unexpected statement"),
+                                    Statement::CreateIndex {
+                                        index_name,
+                                        table,
+                                        column,
+                                    } => WalEntry::CreateIndex {
+                                        index_name: index_name.clone(),
+                                        table: table.clone(),
+                                        column: column.clone(),
+                                    },
+                                    Statement::DropIndex { index_name } => WalEntry::DropIndex {
+                                        index_name: index_name.clone(),
+                                    },
+                                    _ => continue,
                                 };
 
                                 wal::append(&wal_path, &wal_entry).ok();
@@ -128,7 +148,7 @@ pub fn start(db_path: String, port: u16) {
                             match execute_server(&mut db, stmt) {
                                 Ok(result) => {
                                     stream.write_all(result.as_bytes()).ok();
-                                    stream.write_all(b"\n").ok();
+                                    stream.write_all(b"\n--END--\n").ok();
 
                                     if is_mutation {
                                         if db.save(&db_path).is_ok() {
@@ -137,13 +157,15 @@ pub fn start(db_path: String, port: u16) {
                                     }
                                 }
                                 Err(e) => {
-                                    stream.write_all(format!("✗ {}\n", e).as_bytes()).ok();
+                                    stream
+                                        .write_all(format!("✗ {}\n--END--\n", e).as_bytes())
+                                        .ok();
                                 }
                             }
                         }
                         Err(e) => {
                             stream
-                                .write_all(format!("✗ Parse error: {}\n", e).as_bytes())
+                                .write_all(format!("✗ Parse error: {}\n--END--\n", e).as_bytes())
                                 .ok();
                         }
                     }

@@ -60,6 +60,16 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
                 db.update(table, column, value, condition)?;
             }
             WalEntry::Checkpoint => {}
+            WalEntry::CreateIndex {
+                index_name,
+                table,
+                column,
+            } => {
+                db.create_index(table, index_name, column)?;
+            }
+            WalEntry::DropIndex { index_name } => {
+                db.drop_index(index_name)?;
+            }
         }
     }
 
@@ -276,22 +286,17 @@ fn main() {
                                 },
                                 Statement::CreateIndex {
                                     index_name,
-                                    table: _,
-                                    column: _,
-                                } => {
-                                    // Indexes are part of the database save, include in WAL
-                                    // by treating as a note - we don't have a specific CreateIndex WAL entry
-                                    // so we include it in the checkpoint logic
-                                    WalEntry::CreateTable {
-                                        table: format!("__index__{}", index_name),
-                                        columns: vec![],
-                                    }
-                                }
-                                Statement::DropIndex { index_name } => WalEntry::Delete {
-                                    table: format!("__index__{}", index_name),
-                                    condition: None,
+                                    table,
+                                    column,
+                                } => WalEntry::CreateIndex {
+                                    index_name: index_name.clone(),
+                                    table: table.clone(),
+                                    column: column.clone(),
                                 },
-                                _ => panic!("Unexpected non-mutation statement"),
+                                Statement::DropIndex { index_name } => WalEntry::DropIndex {
+                                    index_name: index_name.clone(),
+                                },
+                                _ => continue,
                             };
 
                             if let Err(e) = wal::append(&wal_path, &wal_entry) {

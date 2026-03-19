@@ -178,14 +178,10 @@ impl BTree {
         }
         self.delete_from_tree(self.root, key);
 
-        // Handle root becoming empty - promote first non-leaf child
+        // Handle root becoming empty - promote first child
         if self.nodes[self.root].keys.is_empty() && !self.nodes[self.root].leaf {
             if !self.nodes[self.root].children.is_empty() {
-                // Find first non-leaf child to promote
-                let mut new_root = self.nodes[self.root].children[0];
-                while self.nodes[new_root].leaf && !self.nodes[new_root].children.is_empty() {
-                    new_root = self.nodes[new_root].children[0];
-                }
+                let new_root = self.nodes[self.root].children[0];
                 self.nodes[self.root] = self.nodes[new_root].clone();
             }
         }
