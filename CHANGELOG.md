@@ -11,6 +11,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-03-19
+
+### Added
+
+#### Write Ahead Log (WAL)
+- Append-before-mutate logging for crash safety
+- WAL entries: Insert, Delete, Update, CreateTable, Checkpoint
+- On startup: replay uncommitted entries from `.wal` file
+- After successful save: append Checkpoint to mark committed
+- Yellow warning on startup if WAL recovery occurred
+
+#### Range Index Scans
+- WHERE age > 18 or WHERE age < 30 now use index if available
+- Index inorder traversal + filter instead of full table scan
+- Scan type labels: (index scan), (index range scan), (full scan)
+
+#### TCP Server Mode
+- `cargo run -- mydb.json --server 7878` starts server
+- Pure stdlib TcpListener, no async/tokio
+- Welcome message: `rustdb v0.2.0 ready`
+- SQL queries return plain text table results
+- `.exit` closes client connection
+- `.quit` shuts down server
+- WAL and auto-save work in server mode
+
+#### B-Tree Depth Fix
+- Fixed `depth()` to correctly calculate tree depth
+- Previously returned 1 even after 50000 inserts
+- Now correctly reports depth (e.g., 15 for 50000 keys with t=2)
+
+### Build Status
+- 41 tests pass, 1 ignored
+- All features work in both REPL and server mode
+
+---
+
 ## [0.2.0] - 2026-03-18
 
 ### Added
