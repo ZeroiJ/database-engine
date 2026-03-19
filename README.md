@@ -4,7 +4,7 @@ A SQL database engine built from scratch in Rust with a real B-Tree implementati
 
 [![Rust](https://img.shields.io/badge/Rust-1.93%2B-blue.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.2.0-green.svg)
+![Version](https://img.shields.io/badge/version-0.3.0-green.svg)
 
 ---
 

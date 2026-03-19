@@ -157,7 +157,7 @@ fn main() {
          ║   {}: {:<24} ║\n\
          ║   {}: {:<24} ║\n\
          ╚══════════════════════════════════════╝",
-            "rustdb v0.2.0 — by Sujal".cyan().bold(),
+            "rustdb v0.3.0 — by Sujal".cyan().bold(),
             "loaded".yellow(),
             db_path,
             "tables".green(),

@@ -46,7 +46,7 @@ pub fn start(db_path: String, port: u16) {
                 let peer = stream.peer_addr().unwrap();
                 println!("{}", format!("→ client connected: {}", peer).cyan());
 
-                stream.write_all(b"rustdb v0.2.0 ready\n").ok();
+                stream.write_all(b"rustdb v0.3.0 ready\n").ok();
 
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
