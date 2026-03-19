@@ -3,9 +3,17 @@ name = "database-engine"
 version = "0.3.0"
 edition = "2024"
 
+[lib]
+name = "database_engine"
+path = "src/lib.rs"
+
 [[bin]]
-name = "database-engine"
+name = "rustdb"
 path = "src/main.rs"
+
+[[bin]]
+name = "rustdb-server"
+path = "src/server_bin.rs"
 
 [[bin]]
 name = "rustdb-client"

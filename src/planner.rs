@@ -268,7 +268,6 @@ pub fn format_plan(plan: &QueryPlan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{ColumnDef, DataType};
 
     #[test]
     fn test_plan_full_scan() {

@@ -677,6 +677,10 @@ impl Database {
         self.tables.len()
     }
 
+    pub fn table_names(&self) -> Vec<String> {
+        self.tables.keys().cloned().collect()
+    }
+
     pub fn save(&self, path: &str) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Serialization error: {}", e))?;

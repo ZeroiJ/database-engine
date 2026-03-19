@@ -88,6 +88,70 @@ pub fn start(db_path: String, port: u16) {
                         continue;
                     }
 
+                    if input == ".tables" {
+                        let tables = db.table_names();
+                        let mut response = String::new();
+                        if tables.is_empty() {
+                            response.push_str("(no tables)\n");
+                        } else {
+                            response.push_str("Tables in database:\n");
+                            for t in tables {
+                                response.push_str(&format!("  • {}\n", t));
+                            }
+                        }
+                        response.push_str("--END--\n");
+                        stream.write_all(response.as_bytes()).ok();
+                        continue;
+                    }
+
+                    if input.starts_with(".schema") {
+                        let table_name = input.trim_start_matches(".schema").trim();
+                        let mut response = String::new();
+                        if table_name.is_empty() {
+                            response.push_str("Usage: .schema <table_name>\n");
+                        } else if let Some(table) = db.get_table(table_name) {
+                            response.push_str(&format!("Table: {}\n", table_name));
+                            for col in &table.columns {
+                                let type_str = match col.data_type {
+                                    crate::parser::DataType::Int => "INT",
+                                    crate::parser::DataType::Text => "TEXT",
+                                    crate::parser::DataType::Float => "FLOAT",
+                                    crate::parser::DataType::Boolean => "BOOLEAN",
+                                };
+                                response.push_str(&format!("  {:<12} {}\n", col.name, type_str));
+                            }
+                        } else {
+                            response.push_str(&format!("Table '{}' not found\n", table_name));
+                        }
+                        response.push_str("--END--\n");
+                        stream.write_all(response.as_bytes()).ok();
+                        continue;
+                    }
+
+                    if input == ".stats" {
+                        let tables = db.table_count();
+                        let total_rows: usize = db
+                            .table_names()
+                            .iter()
+                            .filter_map(|t| db.get_table(t))
+                            .map(|t| t.rows.inorder().len())
+                            .sum();
+                        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                        let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+                        let response = format!(
+                            "Database stats:\n  Tables     : {}\n  Total rows : {}\n  File size  : {} bytes\n  WAL size   : {} bytes\n--END--\n",
+                            tables, total_rows, db_size, wal_size
+                        );
+                        stream.write_all(response.as_bytes()).ok();
+                        continue;
+                    }
+
+                    if input == ".help" {
+                        let response = "REPL Commands:\n  .tables      - List all tables\n  .schema <t>  - Show table schema\n  .stats       - Show database statistics\n  .help        - Show this help message\n  .exit        - Disconnect\n  .quit        - Shutdown server\n--END--\n";
+                        stream.write_all(response.as_bytes()).ok();
+                        continue;
+                    }
+
                     let tokens = lexer::tokenize(input);
                     match parser::parse(tokens) {
                         Ok(stmt) => {

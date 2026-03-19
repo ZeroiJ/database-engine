@@ -1,33 +1,22 @@
+use colored::Colorize;
+use database_engine::lexer;
+use database_engine::parser::Statement;
+use database_engine::planner;
+use database_engine::storage::Database;
+use database_engine::wal::WalEntry;
+use database_engine::{parser, wal_path as engine_wal_path};
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use colored::Colorize;
-
-mod btree;
-mod lexer;
-mod parser;
-mod planner;
-mod server;
-mod storage;
-mod wal;
-
-use parser::Statement;
-use storage::Database;
-use wal::WalEntry;
-
 /// Get the WAL file path from the database path.
 pub fn wal_path(db_path: &str) -> String {
-    if db_path.ends_with(".json") {
-        format!("{}.wal", &db_path[..db_path.len() - 5])
-    } else {
-        format!("{}.wal", db_path)
-    }
+    engine_wal_path(db_path)
 }
 
 pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
-    let entries = wal::read(wal_path)?;
+    let entries = database_engine::wal::read(wal_path)?;
 
     // Find entries since last checkpoint (or all if no checkpoint)
     let mut entries_to_replay: Vec<WalEntry> = Vec::new();
@@ -82,6 +71,23 @@ fn main() {
     let mut db_path = "rustdb.json".to_string();
     let mut server_port: Option<u16> = None;
 
+    if args.len() == 1 {
+        println!("Usage: rustdb <database.json>");
+        println!("Example: rustdb mydb.json");
+        println!("");
+        println!("REPL Commands:");
+        println!("  .tables   - List all tables");
+        println!("  .schema   - Show table schema (usage: .schema <table>)");
+        println!("  .stats    - Show database statistics");
+        println!("  .clear    - Clear the terminal");
+        println!("  .help     - Show this help message");
+        println!("  .bench N  - Run benchmark with N inserts");
+        println!("  .exit     - Exit and save");
+        println!("");
+        println!("SQL Commands: SELECT, INSERT, CREATE TABLE, etc.");
+        return;
+    }
+
     let mut i = 1;
     while i < args.len() {
         if args[i] == "--server" {
@@ -107,7 +113,7 @@ fn main() {
     }
 
     if let Some(port) = server_port {
-        server::start(db_path, port);
+        database_engine::server::start(db_path, port);
         return;
     }
 
@@ -142,7 +148,7 @@ fn main() {
                         );
                     }
                     // Clear the WAL after successful recovery
-                    if let Err(e) = wal::clear(&wal_path) {
+                    if let Err(e) = database_engine::wal::clear(&wal_path) {
                         eprintln!(
                             "{} Failed to clear WAL after recovery: {}",
                             "✗".red().bold(),
@@ -243,6 +249,92 @@ fn main() {
                     continue;
                 }
 
+                if input == ".tables" {
+                    let tables = db.table_names();
+                    if tables.is_empty() {
+                        println!("{}", "(no tables)".dimmed());
+                    } else {
+                        println!("Tables in database:");
+                        for t in tables {
+                            println!("{}", format!("  • {}", t).yellow());
+                        }
+                    }
+                    continue;
+                }
+
+                if input.starts_with(".schema") {
+                    let table_name = input.trim_start_matches(".schema").trim();
+                    if table_name.is_empty() {
+                        println!("Usage: .schema <table_name>");
+                        continue;
+                    }
+                    if let Some(table) = db.get_table(table_name) {
+                        println!("{}", format!("Table: {}", table_name).cyan().bold());
+                        for col in &table.columns {
+                            let type_str = match col.data_type {
+                                database_engine::parser::DataType::Int => "INT",
+                                database_engine::parser::DataType::Text => "TEXT",
+                                database_engine::parser::DataType::Float => "FLOAT",
+                                database_engine::parser::DataType::Boolean => "BOOLEAN",
+                            };
+                            println!("  {:<12} {}", col.name, type_str.yellow());
+                        }
+                    } else {
+                        println!("{}", format!("Table '{}' not found", table_name).red());
+                    }
+                    continue;
+                }
+
+                if input == ".stats" {
+                    let tables = db.table_count();
+                    let total_rows: usize = db
+                        .table_names()
+                        .iter()
+                        .filter_map(|t| db.get_table(t))
+                        .map(|t| t.rows.inorder().len())
+                        .sum();
+                    let db_size = if Path::new(&db_path).exists() {
+                        std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let wal_size = if Path::new(&wal_path).exists() {
+                        std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    println!("{}", "Database stats:".cyan().bold());
+                    println!("  Tables     : {}", tables.to_string().green());
+                    println!("  Total rows : {}", total_rows.to_string().green());
+                    println!("  File size  : {} bytes", db_size.to_string().yellow());
+                    println!("  WAL size   : {} bytes", wal_size.to_string().yellow());
+                    continue;
+                }
+
+                if input == ".clear" {
+                    print!("\x1B[2J\x1B[H");
+                    io::stdout().flush().ok();
+                    continue;
+                }
+
+                if input == ".help" {
+                    println!("{}", "REPL Commands:".cyan().bold());
+                    println!("  .tables      - List all tables");
+                    println!("  .schema <t>  - Show table schema");
+                    println!("  .stats       - Show database statistics");
+                    println!("  .clear       - Clear the terminal");
+                    println!("  .help        - Show this help message");
+                    println!("  .bench N     - Run benchmark with N inserts");
+                    println!("  .exit        - Exit and save");
+                    println!();
+                    println!("{}", "SQL Commands:".cyan().bold());
+                    println!("  SELECT, INSERT, UPDATE, DELETE");
+                    println!("  CREATE TABLE, CREATE INDEX");
+                    println!("  DROP INDEX");
+                    continue;
+                }
+
                 let start = Instant::now();
                 let tokens = lexer::tokenize(input);
                 match parser::parse(tokens) {
@@ -300,7 +392,7 @@ fn main() {
                                 _ => continue,
                             };
 
-                            if let Err(e) = wal::append(&wal_path, &wal_entry) {
+                            if let Err(e) = database_engine::wal::append(&wal_path, &wal_entry) {
                                 println!(
                                     "{} {}",
                                     "⚠".yellow().bold(),
@@ -322,9 +414,10 @@ fn main() {
                                         );
                                     } else {
                                         // WAL: append checkpoint after successful save
-                                        if let Err(e) =
-                                            wal::append(&wal_path, &WalEntry::Checkpoint)
-                                        {
+                                        if let Err(e) = database_engine::wal::append(
+                                            &wal_path,
+                                            &WalEntry::Checkpoint,
+                                        ) {
                                             println!(
                                                 "{} {}",
                                                 "⚠".yellow().bold(),
