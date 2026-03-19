@@ -8,6 +8,7 @@ use colored::Colorize;
 mod btree;
 mod lexer;
 mod parser;
+mod server;
 mod storage;
 mod wal;
 
@@ -16,7 +17,7 @@ use storage::Database;
 use wal::WalEntry;
 
 /// Get the WAL file path from the database path.
-fn wal_path(db_path: &str) -> String {
+pub fn wal_path(db_path: &str) -> String {
     if db_path.ends_with(".json") {
         format!("{}.wal", &db_path[..db_path.len() - 5])
     } else {
@@ -24,8 +25,7 @@ fn wal_path(db_path: &str) -> String {
     }
 }
 
-/// Replay WAL entries since the last checkpoint against the database.
-fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
+pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
     let entries = wal::read(wal_path)?;
 
     // Find entries since last checkpoint (or all if no checkpoint)
@@ -68,10 +68,37 @@ fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let db_path = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "rustdb.json".to_string());
+    let mut db_path = "rustdb.json".to_string();
+    let mut server_port: Option<u16> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--server" {
+            if let Some(port_str) = args.get(i + 1) {
+                match port_str.parse::<u16>() {
+                    Ok(port) => {
+                        server_port = Some(port);
+                        i += 2;
+                    }
+                    Err(_) => {
+                        eprintln!("Invalid port: {}", port_str);
+                        return;
+                    }
+                }
+            } else {
+                eprintln!("--server requires a port number");
+                return;
+            }
+        } else {
+            db_path = args[i].clone();
+            i += 1;
+        }
+    }
+
+    if let Some(port) = server_port {
+        server::start(db_path, port);
+        return;
+    }
 
     let wal_path = wal_path(&db_path);
     let file_exists = Path::new(&db_path).exists();
