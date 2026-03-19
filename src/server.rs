@@ -1,6 +1,7 @@
 use crate::lexer;
 use crate::parser;
 use crate::parser::Statement;
+use crate::planner;
 use crate::storage::Database;
 use crate::wal;
 use crate::wal::WalEntry;
@@ -228,10 +229,17 @@ fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> 
         } => {
             let count = db.update(table, column, value, condition)?;
             Ok(format!(
-                "✓ {} {} updated",
+                "{} {} updated",
                 count,
                 if count == 1 { "row" } else { "rows" }
             ))
+        }
+        Statement::Explain { inner } => {
+            if let Some(query_plan) = planner::plan(db, &*inner) {
+                Ok(planner::format_plan(&query_plan))
+            } else {
+                Ok("EXPLAIN only supported for SELECT statements".to_string())
+            }
         }
     }
 }

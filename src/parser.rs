@@ -34,6 +34,9 @@ pub enum Statement {
     DropIndex {
         index_name: String,
     },
+    Explain {
+        inner: Box<Statement>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +86,13 @@ pub fn parse(tokens: Vec<Token>) -> Result<Statement, String> {
     let mut tokens = tokens.into_iter().peekable();
 
     match tokens.next() {
+        Some(Token::Explain) => {
+            let inner_tokens: Vec<Token> = tokens.collect();
+            let inner = parse(inner_tokens)?;
+            Ok(Statement::Explain {
+                inner: Box::new(inner),
+            })
+        }
         Some(Token::Select) => parse_select(&mut tokens),
         Some(Token::Insert) => parse_insert(&mut tokens),
         Some(Token::Create) => {

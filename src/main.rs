@@ -8,6 +8,7 @@ use colored::Colorize;
 mod btree;
 mod lexer;
 mod parser;
+mod planner;
 mod server;
 mod storage;
 mod wal;
@@ -444,6 +445,13 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
                     if count == 1 { "row" } else { "rows" }
                 )
             ))
+        }
+        Statement::Explain { inner } => {
+            if let Some(query_plan) = planner::plan(db, &*inner) {
+                Ok(planner::format_plan(&query_plan))
+            } else {
+                Ok("EXPLAIN only supported for SELECT statements".to_string())
+            }
         }
     }
 }
