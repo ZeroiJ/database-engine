@@ -281,8 +281,72 @@ impl Database {
         let results: Vec<Row>;
 
         if let Some(ref where_clause) = condition {
-            // Try to use an index only for simple equality conditions on an indexed column
-            if let Some(simple_cond) = Self::extract_simple_index_condition(where_clause) {
+            if Self::has_indexed_range_condition(where_clause, &table) {
+                if let Some(range_cond) = Self::extract_range_index_condition(where_clause) {
+                    if let Some(index) = table
+                        .indexes
+                        .values()
+                        .find(|i| i.column == range_cond.column)
+                    {
+                        let all_index_entries = index.tree.iter();
+                        let mut matched_row_ids: Vec<i64> = Vec::new();
+                        for (_idx_key, row_ids) in all_index_entries {
+                            let has_match = row_ids.iter().any(|&row_id| {
+                                if let Some(row) = table.rows.search(row_id) {
+                                    if let Some(col_idx) = table
+                                        .columns
+                                        .iter()
+                                        .position(|c| c.name == range_cond.column)
+                                    {
+                                        if let Some(col_val) = row.get(col_idx) {
+                                            return Self::compare_values(
+                                                col_val,
+                                                &range_cond.value,
+                                            ) == match range_cond.operator {
+                                                Operator::Gt => Some(std::cmp::Ordering::Greater),
+                                                Operator::Lt => Some(std::cmp::Ordering::Less),
+                                                _ => Some(std::cmp::Ordering::Equal),
+                                            };
+                                        }
+                                    }
+                                }
+                                false
+                            });
+                            if has_match {
+                                matched_row_ids.extend(row_ids);
+                            }
+                        }
+                        matched_row_ids.sort_unstable();
+                        matched_row_ids.dedup();
+                        results = matched_row_ids
+                            .iter()
+                            .filter_map(|row_id| table.rows.search(*row_id))
+                            .map(|row| column_indices.iter().map(|&i| row[i].clone()).collect())
+                            .collect();
+                        used_index = true;
+                    } else {
+                        let all_rows = table.rows.inorder();
+                        results = all_rows
+                            .iter()
+                            .filter(|(_, row)| {
+                                Self::evaluate_where_static(row, &table.columns, where_clause)
+                            })
+                            .map(|(_, row)| {
+                                column_indices.iter().map(|&i| row[i].clone()).collect()
+                            })
+                            .collect();
+                    }
+                } else {
+                    let all_rows = table.rows.inorder();
+                    results = all_rows
+                        .iter()
+                        .filter(|(_, row)| {
+                            Self::evaluate_where_static(row, &table.columns, where_clause)
+                        })
+                        .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
+                        .collect();
+                }
+            } else if let Some(simple_cond) = Self::extract_simple_index_condition(where_clause) {
                 if let Some(index) = table
                     .indexes
                     .values()
@@ -531,22 +595,32 @@ impl Database {
             None => return false,
         };
 
-        match (&condition.operator, row_value, &condition.value) {
-            (Operator::Eq, Value::Integer(lhs), Value::Integer(rhs)) => lhs == rhs,
-            (Operator::Eq, Value::Float(lhs), Value::Float(rhs)) => lhs == rhs,
-            (Operator::Eq, Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
-            (Operator::Eq, Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
-            (Operator::Eq, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) == *rhs,
-            (Operator::Eq, Value::Float(lhs), Value::Integer(rhs)) => *lhs == (*rhs as f64),
-            (Operator::Gt, Value::Integer(lhs), Value::Integer(rhs)) => lhs > rhs,
-            (Operator::Gt, Value::Float(lhs), Value::Float(rhs)) => lhs > rhs,
-            (Operator::Gt, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) > *rhs,
-            (Operator::Gt, Value::Float(lhs), Value::Integer(rhs)) => *lhs > (*rhs as f64),
-            (Operator::Lt, Value::Integer(lhs), Value::Integer(rhs)) => lhs < rhs,
-            (Operator::Lt, Value::Float(lhs), Value::Float(rhs)) => lhs < rhs,
-            (Operator::Lt, Value::Integer(lhs), Value::Float(rhs)) => (*lhs as f64) < *rhs,
-            (Operator::Lt, Value::Float(lhs), Value::Integer(rhs)) => *lhs < (*rhs as f64),
-            _ => false,
+        Self::compare_values(row_value, &condition.value)
+            == match condition.operator {
+                Operator::Eq => Some(std::cmp::Ordering::Equal),
+                Operator::Gt => Some(std::cmp::Ordering::Greater),
+                Operator::Lt => Some(std::cmp::Ordering::Less),
+            }
+    }
+
+    fn compare_values(row_val: &Value, cond_val: &Value) -> Option<std::cmp::Ordering> {
+        match (row_val, cond_val) {
+            (Value::Integer(lhs), Value::Integer(rhs)) => Some(lhs.cmp(rhs)),
+            (Value::Float(lhs), Value::Float(rhs)) => {
+                Some(lhs.partial_cmp(rhs).unwrap_or(std::cmp::Ordering::Equal))
+            }
+            (Value::Boolean(lhs), Value::Boolean(rhs)) => Some(lhs.cmp(rhs)),
+            (Value::Text(lhs), Value::Text(rhs)) => Some(lhs.cmp(rhs)),
+            (Value::Integer(lhs), Value::Float(rhs)) => Some(
+                (*lhs as f64)
+                    .partial_cmp(rhs)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            ),
+            (Value::Float(lhs), Value::Integer(rhs)) => Some(
+                lhs.partial_cmp(&(*rhs as f64))
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            ),
+            _ => None,
         }
     }
 
@@ -568,6 +642,30 @@ impl Database {
         match where_clause {
             WhereClause::Single(cond) => Some(cond.clone()),
             _ => None,
+        }
+    }
+
+    fn extract_range_index_condition(where_clause: &WhereClause) -> Option<Condition> {
+        match where_clause {
+            WhereClause::Single(cond) => {
+                if matches!(cond.operator, Operator::Gt | Operator::Lt) {
+                    Some(cond.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn has_indexed_range_condition(where_clause: &WhereClause, table: &Table) -> bool {
+        if let Some(range_cond) = Self::extract_range_index_condition(where_clause) {
+            table
+                .indexes
+                .values()
+                .any(|i| i.column == range_cond.column)
+        } else {
+            false
         }
     }
 
@@ -1125,5 +1223,125 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Column not found"));
+    }
+
+    #[test]
+    fn test_range_scan_gt() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+
+        for i in 0..10 {
+            db.insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(i),
+                    Value::Integer(18 + i),
+                    Value::Text(format!("user{}", i)),
+                ],
+            )
+            .unwrap();
+        }
+
+        db.create_index(
+            "users".to_string(),
+            "idx_age".to_string(),
+            "age".to_string(),
+        )
+        .unwrap();
+
+        let (result, index_used) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Gt,
+                    value: Value::Integer(25),
+                })),
+            )
+            .unwrap();
+
+        assert!(index_used);
+        assert_eq!(result.len(), 2);
+        for row in &result {
+            if let Value::Integer(age) = row[1] {
+                assert!(age > 25);
+            }
+        }
+    }
+
+    #[test]
+    fn test_range_scan_lt() {
+        let mut db = Database::new();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+        ];
+
+        db.create_table("users".to_string(), columns).unwrap();
+
+        for i in 0..10 {
+            db.insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(i),
+                    Value::Integer(18 + i),
+                    Value::Text(format!("user{}", i)),
+                ],
+            )
+            .unwrap();
+        }
+
+        db.create_index(
+            "users".to_string(),
+            "idx_age".to_string(),
+            "age".to_string(),
+        )
+        .unwrap();
+
+        let (result, index_used) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Lt,
+                    value: Value::Integer(22),
+                })),
+            )
+            .unwrap();
+
+        assert!(index_used);
+        assert_eq!(result.len(), 4);
+        for row in &result {
+            if let Value::Integer(age) = row[1] {
+                assert!(age < 22);
+            }
+        }
     }
 }

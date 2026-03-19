@@ -353,12 +353,13 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             let table_name = table.clone();
             let (rows, index_used) = db.select(table, columns, condition)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
-            let table_output = format_table(&table_meta.columns, &rows);
-            if index_used {
-                Ok(table_output)
+            let base_output = format_table(&table_meta.columns, &rows);
+            let table_output = if index_used {
+                format!("{}\n\n  (index range scan)", base_output)
             } else {
-                Ok(table_output)
-            }
+                base_output
+            };
+            Ok(table_output)
         }
         Statement::CreateIndex {
             index_name,
