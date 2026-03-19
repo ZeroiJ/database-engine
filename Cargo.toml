@@ -3,10 +3,20 @@ name = "database-engine"
 version = "0.3.0"
 edition = "2024"
 
+[[bin]]
+name = "database-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "rustdb-client"
+path = "src/client.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 colored = "2.1"
+rustyline = "14.0"
+ctrlc = "3.4"
 
 [dev-dependencies]
 tempfile = "3.8"
