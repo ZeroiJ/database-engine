@@ -10,7 +10,6 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
-/// Get the WAL file path from the database path.
 pub fn wal_path(db_path: &str) -> String {
     engine_wal_path(db_path)
 }
@@ -18,7 +17,6 @@ pub fn wal_path(db_path: &str) -> String {
 pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
     let entries = database_engine::wal::read(wal_path)?;
 
-    // Find entries since last checkpoint (or all if no checkpoint)
     let mut entries_to_replay: Vec<WalEntry> = Vec::new();
     for entry in entries.into_iter().rev() {
         if matches!(entry, WalEntry::Checkpoint) {
@@ -66,25 +64,200 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
     Ok(count)
 }
 
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*c);
+    }
+    result
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} bytes", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: usize) {
+    println!();
+    println!(
+        "{}",
+        "╔══════════════════════════════════════════════════╗".cyan()
+    );
+    println!(
+        "{}",
+        "║                                                  ║".cyan()
+    );
+    println!(
+        "{}",
+        "║  ██████╗ ██╗   ██╗███████╗████████╗██████╗      ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "║  ██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔══██╗     ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "║  ██████╔╝██║   ██║███████╗   ██║   ██║  ██║     ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "║  ██╔══██╗██║   ██║╚════██║   ██║   ██║  ██║     ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "║  ██║  ██║╚██████╔╝███████║   ██║   ██████╔╝     ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "║  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═════╝      ║"
+            .cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "╠══════════════════════════════════════════════════╣".cyan()
+    );
+    println!(
+        "{}",
+        format!(
+            "║  {}  •  {}  •  {}          ║",
+            "v0.4.0".bold().yellow(),
+            "by Sujal".bold().white(),
+            "built in Rust".dimmed()
+        )
+        .cyan()
+    );
+    println!(
+        "{}",
+        "╠══════════════════════════════════════════════════╣".cyan()
+    );
+    println!(
+        "{}",
+        format!(
+            "║  {} {:<40} ║",
+            "database".dimmed(),
+            db_path.bold().yellow()
+        )
+        .cyan()
+    );
+    println!(
+        "{}",
+        format!(
+            "║  {} {:<40} ║",
+            "tables".dimmed(),
+            table_count.to_string().bold().green()
+        )
+        .cyan()
+    );
+    if wal_recovered > 0 {
+        println!(
+            "{}",
+            format!(
+                "║  {} {:<40} ║",
+                "recovery".dimmed(),
+                format!("replayed {} ops", wal_recovered).bold().yellow()
+            )
+            .cyan()
+        );
+    }
+    println!(
+        "{}",
+        format!(
+            "║  {} {:<40} ║",
+            "status".dimmed(),
+            if is_new {
+                "new database".bold().yellow()
+            } else {
+                "ready".bold().green()
+            }
+        )
+        .cyan()
+    );
+    println!(
+        "{}",
+        "╚══════════════════════════════════════════════════╝".cyan()
+    );
+    println!();
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut db_path = "rustdb.json".to_string();
     let mut server_port: Option<u16> = None;
 
     if args.len() == 1 {
-        println!("Usage: rustdb <database.json>");
-        println!("Example: rustdb mydb.json");
-        println!("");
-        println!("REPL Commands:");
-        println!("  .tables   - List all tables");
-        println!("  .schema   - Show table schema (usage: .schema <table>)");
-        println!("  .stats    - Show database statistics");
-        println!("  .clear    - Clear the terminal");
-        println!("  .help     - Show this help message");
-        println!("  .bench N  - Run benchmark with N inserts");
-        println!("  .exit     - Exit and save");
-        println!("");
-        println!("SQL Commands: SELECT, INSERT, CREATE TABLE, etc.");
+        println!("{}", "Usage: rustdb <database.json>".white());
+        println!("{}", "Example: rustdb mydb.json".dimmed());
+        println!();
+        println!("{}", "REPL Commands:".cyan().bold());
+        println!(
+            "  {}  {}",
+            ".tables".bold().white(),
+            "list all tables".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            ".schema <table>".bold().white(),
+            "show table schema".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            ".stats".bold().white(),
+            "database statistics".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            ".clear".bold().white(),
+            "clear the screen".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            ".bench N".bold().white(),
+            "benchmark N inserts".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            ".help".bold().white(),
+            "show this message".dimmed()
+        );
+        println!("  {}  {}", ".exit".bold().white(), "save and quit".dimmed());
+        println!();
+        println!("{}", "SQL Commands:".cyan().bold());
+        println!(
+            "  {}  {}",
+            "SELECT, INSERT, UPDATE, DELETE".bold().white(),
+            "CRUD operations".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            "CREATE TABLE, CREATE INDEX".bold().white(),
+            "schema management".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            "DROP INDEX, EXPLAIN".bold().white(),
+            "index and query plans".dimmed()
+        );
         return;
     }
 
@@ -98,12 +271,12 @@ fn main() {
                         i += 2;
                     }
                     Err(_) => {
-                        eprintln!("Invalid port: {}", port_str);
+                        eprintln!("{}", format!("✗ Invalid port: {}", port_str).red());
                         return;
                     }
                 }
             } else {
-                eprintln!("--server requires a port number");
+                eprintln!("{}", "✗ --server requires a port number".red());
                 return;
             }
         } else {
@@ -132,73 +305,51 @@ fn main() {
         Err(_) => Database::new(),
     };
 
-    // WAL recovery
     let mut wal_recovered = 0;
     if wal_exists {
         match replay_wal(&mut db, &wal_path) {
             Ok(count) => {
                 if count > 0 {
                     wal_recovered = count;
-                    // Save the recovered state to main DB
+                    println!(
+                        "{}",
+                        format!("⚠  WAL recovery in progress...").yellow().bold()
+                    );
+                    println!(
+                        "{}",
+                        format!("⚠  replayed {} operations successfully", count).yellow()
+                    );
+                    println!();
                     if let Err(e) = db.save(&db_path) {
                         eprintln!(
-                            "{} Failed to save recovered database: {}",
-                            "✗".red().bold(),
-                            e
+                            "{}",
+                            format!("✗ Failed to save recovered database: {}", e).red()
                         );
                     }
-                    // Clear the WAL after successful recovery
                     if let Err(e) = database_engine::wal::clear(&wal_path) {
                         eprintln!(
-                            "{} Failed to clear WAL after recovery: {}",
-                            "✗".red().bold(),
-                            e
+                            "{}",
+                            format!("✗ Failed to clear WAL after recovery: {}", e).red()
                         );
                     }
                 }
             }
             Err(e) => {
-                eprintln!("{} WAL recovery failed: {}", "✗".red().bold(), e);
+                eprintln!("{}", format!("✗ WAL recovery failed: {}", e).red());
             }
         }
     }
 
     let table_count = db.table_count();
-
-    println!();
-    println!(
-        "{}",
-        format!(
-            "╔══════════════════════════════════════╗\n\
-         ║   {}  ║\n\
-         ║   {}: {:<24} ║\n\
-         ║   {}: {:<24} ║\n\
-         ╚══════════════════════════════════════╝",
-            "rustdb v0.3.0 — by Sujal".cyan().bold(),
-            "loaded".yellow(),
-            db_path,
-            "tables".green(),
-            table_count.to_string()
-        )
+    print_banner(
+        &db_path,
+        table_count,
+        !file_exists && wal_recovered == 0,
+        wal_recovered,
     );
-    if !file_exists {
-        println!("{}", "  (new database)".dimmed());
-    }
-    if wal_recovered > 0 {
-        println!(
-            "{}",
-            format!(
-                "⚠ WAL recovery: replayed {} operation{}",
-                wal_recovered.to_string().yellow().bold(),
-                if wal_recovered == 1 { "" } else { "s" }
-            )
-            .yellow()
-        );
-    }
-    println!();
 
     loop {
-        print!("{}", "db> ".bold().green());
+        print!("{}{} ", "db".bold().green(), ">".bold().cyan());
         io::stdout().flush().expect("Failed to flush stdout");
 
         let mut input = String::new();
@@ -212,8 +363,10 @@ fn main() {
                     );
                 } else {
                     println!(
-                        "{}",
-                        format!("✓ {}", "Database saved. Goodbye!").bold().green()
+                        "{} {} {}",
+                        "✓".bold().green(),
+                        "Database saved.".green(),
+                        "Goodbye!".bold().white()
                     );
                 }
                 break;
@@ -232,8 +385,10 @@ fn main() {
                         );
                     } else {
                         println!(
-                            "{}",
-                            format!("✓ {}", "Database saved. Goodbye!").bold().green()
+                            "{} {} {}",
+                            "✓".bold().green(),
+                            "Database saved.".green(),
+                            "Goodbye!".bold().white()
                         );
                     }
                     break;
@@ -252,12 +407,22 @@ fn main() {
                 if input == ".tables" {
                     let tables = db.table_names();
                     if tables.is_empty() {
-                        println!("{}", "(no tables)".dimmed());
+                        println!("{}", "(no tables yet — try CREATE TABLE)".dimmed().italic());
                     } else {
-                        println!("Tables in database:");
+                        let count = tables.len();
+                        println!("{}", "┌─────────────────────────────┐".cyan());
+                        println!(
+                            "{} {} {}{}",
+                            "│".cyan(),
+                            "Tables".bold().yellow(),
+                            format!("({})", count).bold().green(),
+                            " ".repeat(18 - count.to_string().len() - 1) + "│"
+                        );
+                        println!("{}", "├─────────────────────────────┤".cyan());
                         for t in tables {
-                            println!("{}", format!("  • {}", t).yellow());
+                            println!("{}  {} {:<19}│", "│".cyan(), "•".cyan(), t.white());
                         }
+                        println!("{}", "└─────────────────────────────┘".cyan());
                     }
                     continue;
                 }
@@ -265,22 +430,65 @@ fn main() {
                 if input.starts_with(".schema") {
                     let table_name = input.trim_start_matches(".schema").trim();
                     if table_name.is_empty() {
-                        println!("Usage: .schema <table_name>");
+                        println!(
+                            "{} {}",
+                            "✗".red().bold(),
+                            "Usage: .schema <table_name>".red()
+                        );
                         continue;
                     }
                     if let Some(table) = db.get_table(table_name) {
-                        println!("{}", format!("Table: {}", table_name).cyan().bold());
+                        let max_col_len = table
+                            .columns
+                            .iter()
+                            .map(|c| c.name.len())
+                            .max()
+                            .unwrap_or(0)
+                            .max(8);
+                        let col_width = max_col_len + 2;
+                        println!("{}", format!("┌{}┐", "─".repeat(col_width + 16)).cyan());
+                        println!(
+                            "{}  {} {:<width$}│",
+                            "│".cyan(),
+                            "Schema:".bold().yellow(),
+                            table_name.bold().white(),
+                            width = col_width + 7
+                        );
+                        println!(
+                            "{}",
+                            format!("├{}┬{}┤", "─".repeat(col_width), "─".repeat(14)).cyan()
+                        );
+                        println!(
+                            "{}  {}│  {}",
+                            "│".cyan(),
+                            "column".bold().yellow(),
+                            "type".bold().yellow()
+                        );
+                        println!(
+                            "{}",
+                            format!("├{}┼{}┤", "─".repeat(col_width), "─".repeat(14)).cyan()
+                        );
                         for col in &table.columns {
                             let type_str = match col.data_type {
-                                database_engine::parser::DataType::Int => "INT",
-                                database_engine::parser::DataType::Text => "TEXT",
-                                database_engine::parser::DataType::Float => "FLOAT",
-                                database_engine::parser::DataType::Boolean => "BOOLEAN",
+                                database_engine::parser::DataType::Int => "INT".green(),
+                                database_engine::parser::DataType::Text => "TEXT".yellow(),
+                                database_engine::parser::DataType::Float => "FLOAT".cyan(),
+                                database_engine::parser::DataType::Boolean => "BOOLEAN".magenta(),
                             };
-                            println!("  {:<12} {}", col.name, type_str.yellow());
+                            println!(
+                                "{}  {:<width$}│  {}",
+                                "│".cyan(),
+                                col.name.white(),
+                                type_str,
+                                width = col_width
+                            );
                         }
+                        println!(
+                            "{}",
+                            format!("└{}┴{}┘", "─".repeat(col_width), "─".repeat(14)).cyan()
+                        );
                     } else {
-                        println!("{}", format!("Table '{}' not found", table_name).red());
+                        println!("{}", format!("✗ Table '{}' not found", table_name).red());
                     }
                     continue;
                 }
@@ -303,12 +511,54 @@ fn main() {
                     } else {
                         0
                     };
+                    let max_depth = db
+                        .table_names()
+                        .iter()
+                        .filter_map(|t| db.get_table(t))
+                        .map(|t| t.rows.depth())
+                        .max()
+                        .unwrap_or(0);
 
-                    println!("{}", "Database stats:".cyan().bold());
-                    println!("  Tables     : {}", tables.to_string().green());
-                    println!("  Total rows : {}", total_rows.to_string().green());
-                    println!("  File size  : {} bytes", db_size.to_string().yellow());
-                    println!("  WAL size   : {} bytes", wal_size.to_string().yellow());
+                    println!("{}", "┌─────────────────────────────────┐".cyan());
+                    println!("{}", "│  Database Statistics            │".cyan().bold());
+                    println!("{}", "├─────────────────────────────────┤".cyan());
+                    println!(
+                        "{}",
+                        format!("│  tables      →  {}", tables.to_string().bold().green()).cyan()
+                    );
+                    println!(
+                        "{}",
+                        format!(
+                            "│  total rows  →  {}",
+                            format_number(total_rows).bold().green()
+                        )
+                        .cyan()
+                    );
+                    println!(
+                        "{}",
+                        format!(
+                            "│  file size   →  {}",
+                            format_bytes(db_size).bold().yellow()
+                        )
+                        .cyan()
+                    );
+                    println!(
+                        "{}",
+                        format!(
+                            "│  wal size    →  {}",
+                            format_bytes(wal_size).bold().yellow()
+                        )
+                        .cyan()
+                    );
+                    println!(
+                        "{}",
+                        format!(
+                            "│  b-tree depth →  {} (largest)",
+                            max_depth.to_string().bold().green()
+                        )
+                        .cyan()
+                    );
+                    println!("{}", "└─────────────────────────────────┘".cyan());
                     continue;
                 }
 
@@ -319,19 +569,114 @@ fn main() {
                 }
 
                 if input == ".help" {
-                    println!("{}", "REPL Commands:".cyan().bold());
-                    println!("  .tables      - List all tables");
-                    println!("  .schema <t>  - Show table schema");
-                    println!("  .stats       - Show database statistics");
-                    println!("  .clear       - Clear the terminal");
-                    println!("  .help        - Show this help message");
-                    println!("  .bench N     - Run benchmark with N inserts");
-                    println!("  .exit        - Exit and save");
-                    println!();
-                    println!("{}", "SQL Commands:".cyan().bold());
-                    println!("  SELECT, INSERT, UPDATE, DELETE");
-                    println!("  CREATE TABLE, CREATE INDEX");
-                    println!("  DROP INDEX");
+                    println!(
+                        "{}",
+                        "┌─────────────────────────────────────────────┐".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  rustdb — help                              │"
+                            .cyan()
+                            .bold()
+                    );
+                    println!(
+                        "{}",
+                        "├─────────────────────────────────────────────┤".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  REPL Commands                              │"
+                            .cyan()
+                            .bold()
+                            .yellow()
+                    );
+                    println!(
+                        "{}",
+                        "│  .tables          list all tables           │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .schema <table>  show table schema         │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .stats           database statistics       │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .clear           clear the screen          │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .bench N         benchmark N inserts       │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .help            show this message         │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  .exit            save and quit             │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "├─────────────────────────────────────────────┤".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  SQL Syntax                                 │"
+                            .cyan()
+                            .bold()
+                            .yellow()
+                    );
+                    println!(
+                        "{}",
+                        "│  SELECT * FROM table                        │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  SELECT * FROM table WHERE col = val        │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  SELECT * FROM table ORDER BY col DESC      │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  SELECT * FROM table LIMIT 10               │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  INSERT INTO table VALUES (...)             │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  UPDATE table SET col = val WHERE ...       │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  DELETE FROM table WHERE col = val          │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  CREATE TABLE name (col TYPE, ...)          │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  CREATE INDEX name ON table(col)            │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  DROP INDEX name                            │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "│  EXPLAIN SELECT ...                         │".cyan()
+                    );
+                    println!(
+                        "{}",
+                        "└─────────────────────────────────────────────┘".cyan()
+                    );
                     continue;
                 }
 
@@ -349,7 +694,6 @@ fn main() {
                                 | Statement::DropIndex { .. }
                         );
 
-                        // WAL: append entry before mutation
                         if is_mutation {
                             let wal_entry = match &stmt {
                                 Statement::CreateTable { table, columns } => {
@@ -413,7 +757,6 @@ fn main() {
                                             format!("Error auto-saving: {}", e).red()
                                         );
                                     } else {
-                                        // WAL: append checkpoint after successful save
                                         if let Err(e) = database_engine::wal::append(
                                             &wal_path,
                                             &WalEntry::Checkpoint,
@@ -427,10 +770,10 @@ fn main() {
                                     }
                                 }
                                 println!(
-                                    "{}",
+                                    "  {}",
                                     format!(
-                                        "  {} rows returned in {:.1}ms",
-                                        "•".dimmed(),
+                                        "• {} rows returned in {:.1}ms",
+                                        "2",
                                         elapsed.as_secs_f64() * 1000.0
                                     )
                                     .dimmed()
@@ -460,14 +803,16 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
         Statement::CreateTable { table, columns } => {
             db.create_table(table.clone(), columns)?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!("Table '{}' created", table).green()
             ))
         }
         Statement::Insert { table, values } => {
             let row_id = db.insert(table.clone(), values)?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!("row inserted (id: {})", row_id.to_string().yellow()).green()
             ))
         }
@@ -479,15 +824,10 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             limit,
         } => {
             let table_name = table.clone();
-            let (rows, index_used) = db.select(table, columns, condition, order_by, limit)?;
+            let (rows, _index_used) = db.select(table, columns, condition, order_by, limit)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
             let base_output = format_table(&table_meta.columns, &rows);
-            let table_output = if index_used {
-                format!("{}\n\n  (index range scan)", base_output)
-            } else {
-                base_output
-            };
-            Ok(table_output)
+            Ok(base_output)
         }
         Statement::CreateIndex {
             index_name,
@@ -497,7 +837,8 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             let table_name = table.clone();
             db.create_index(table, index_name.clone(), column.clone())?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!(
                     "Index '{}' created on {}({})",
                     index_name.green(),
@@ -510,19 +851,22 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
         Statement::DropIndex { index_name } => {
             db.drop_index(index_name.clone())?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!("Index '{}' dropped", index_name.green()).green()
             ))
         }
         Statement::Delete { table, condition } => {
             let count = db.delete(table, condition)?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!(
                     "{} {} deleted",
                     count.to_string().green(),
                     if count == 1 { "row" } else { "rows" }
                 )
+                .green()
             ))
         }
         Statement::Update {
@@ -533,22 +877,81 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
         } => {
             let count = db.update(table, column, value, condition)?;
             Ok(format!(
-                "✓ {}",
+                "{} {}",
+                "✓".bold().green(),
                 format!(
                     "{} {} updated",
                     count.to_string().green(),
                     if count == 1 { "row" } else { "rows" }
                 )
+                .green()
             ))
         }
         Statement::Explain { inner } => {
             if let Some(query_plan) = planner::plan(db, &*inner) {
-                Ok(planner::format_plan(&query_plan))
+                Ok(format_explain(&query_plan))
             } else {
-                Ok("EXPLAIN only supported for SELECT statements".to_string())
+                Ok(format!(
+                    "{} {}",
+                    "✗".red().bold(),
+                    "EXPLAIN only supported for SELECT statements".red()
+                ))
             }
         }
     }
+}
+
+fn format_explain(plan: &planner::QueryPlan) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "{}\n",
+        "┌─────────────────────────────────────────┐".cyan()
+    ));
+    output.push_str(&format!("{}  {}\n", "│".cyan(), "Query Plan".bold().cyan()));
+    output.push_str(&format!(
+        "{}\n",
+        "├─────────────────────────────────────────┤".cyan()
+    ));
+
+    let op_value = match &plan.scan_type {
+        planner::ScanType::FullScan => "FULL_SCAN".yellow().to_string(),
+        planner::ScanType::IndexScan { index_name, .. } => {
+            format!("{} ({})", "INDEX_SCAN".bold().green(), index_name.cyan())
+        }
+        planner::ScanType::IndexRangeScan { index_name, .. } => {
+            format!(
+                "{} ({})",
+                "INDEX_RANGE_SCAN".bold().green(),
+                index_name.cyan()
+            )
+        }
+    };
+    output.push_str(&format!("│  operation  →  {}\n", op_value));
+    output.push_str(&format!("│  table      →  {}\n", plan.table.white()));
+
+    if let Some(condition) = &plan.condition {
+        output.push_str(&format!("│  condition  →  {}\n", condition.white()));
+    }
+
+    if let Some(order_by) = &plan.order_by {
+        output.push_str(&format!("│  order by   →  {}\n", order_by.white()));
+    }
+
+    if let Some(limit) = &plan.limit {
+        output.push_str(&format!("│  limit      →  {}\n", limit.to_string().green()));
+    }
+
+    output.push_str(&format!(
+        "│  est. rows  →  ~{} of {}\n",
+        format_number(plan.estimated_rows).green(),
+        format_number(plan.total_rows).green()
+    ));
+
+    output.push_str(&format!(
+        "{}",
+        "└─────────────────────────────────────────┘".cyan()
+    ));
+    output
 }
 
 fn run_benchmark(db: &mut Database, n: usize) {
@@ -653,18 +1056,18 @@ fn run_benchmark(db: &mut Database, n: usize) {
         "{}",
         format!(
             "╔══════════════════════════════════════════╗\n\
-         ║         {}  ║\n\
-         ╠══════════════════════════════════════════╣\n\
-         ║  INSERT {} rows    →   {:>7.1}ms      ║\n\
-         ║  SELECT full scan   →   {:>7.1}ms      ║\n\
-         ║  SELECT by id       →   {:>7.1}ms      ║\n\
-         ║  CREATE INDEX      →   {:>7.1}ms      ║\n\
-         ║  SELECT with index →   {:>7.1}ms      ║\n\
-         ║  DELETE all rows   →   {:>7.1}ms      ║\n\
-         ╠══════════════════════════════════════════╣\n\
-         ║  B-Tree depth       →   {:>7}            ║\n\
-         ║  Rows/sec (insert)  →   {:>7},{}       ║\n\
-         ╚══════════════════════════════════════════╝",
+             ║         {}  ║\n\
+             ╠══════════════════════════════════════════╣\n\
+             ║  INSERT {} rows    →   {:>7.1}ms      ║\n\
+             ║  SELECT full scan   →   {:>7.1}ms      ║\n\
+             ║  SELECT by id       →   {:>7.1}ms      ║\n\
+             ║  CREATE INDEX      →   {:>7.1}ms      ║\n\
+             ║  SELECT with index →   {:>7.1}ms      ║\n\
+             ║  DELETE all rows   →   {:>7.1}ms      ║\n\
+             ╠══════════════════════════════════════════╣\n\
+             ║  B-Tree depth       →   {:>7}            ║\n\
+             ║  Rows/sec (insert)  →   {:>7},{}       ║\n\
+             ╚══════════════════════════════════════════╝",
             format!("rustdb benchmark — {} rows", n),
             n,
             insert_time.as_secs_f64() * 1000.0,
@@ -687,7 +1090,7 @@ fn run_benchmark(db: &mut Database, n: usize) {
 
 fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> String {
     if rows.is_empty() {
-        return "(empty table)".to_string();
+        return "(empty table)".dimmed().italic().to_string();
     }
 
     let select_all = rows[0].len() == columns.len();
