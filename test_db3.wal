@@ -1,0 +1,10 @@
+{"CreateTable":{"table":"products","columns":[{"name":"id","data_type":"Int"},{"name":"name","data_type":"Text"},{"name":"price","data_type":"Float"},{"name":"in_stock","data_type":"Boolean"}]}}
+"Checkpoint"
+{"Insert":{"table":"products","values":[{"Integer":1},{"Text":"apple"},{"Float":1.5},{"Boolean":true}]}}
+"Checkpoint"
+{"Insert":{"table":"products","values":[{"Integer":2},{"Text":"banana"},{"Float":0.99},{"Boolean":true}]}}
+"Checkpoint"
+{"Insert":{"table":"products","values":[{"Integer":3},{"Text":"cherry"},{"Float":2.5},{"Boolean":false}]}}
+"Checkpoint"
+{"Insert":{"table":"products","values":[{"Integer":4},{"Text":"date"},{"Float":0.5},{"Boolean":false}]}}
+"Checkpoint"

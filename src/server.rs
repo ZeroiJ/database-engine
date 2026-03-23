@@ -8,7 +8,9 @@ use crate::wal::WalEntry;
 use colored::Colorize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::net::TcpStream;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub fn start(db_path: String, port: u16) {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|_| {
@@ -47,202 +49,278 @@ pub fn start(db_path: String, port: u16) {
         }
     }
 
+    let db = Arc::new(Mutex::new(db));
+    let db_path = Arc::new(db_path);
+    let wal_path = Arc::new(wal_path);
+    let connection_count = Arc::new(Mutex::new(0usize));
+
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
-                let peer = stream.peer_addr().unwrap();
-                println!("{}", format!("→ client connected: {}", peer).cyan());
+            Ok(stream) => {
+                let db = Arc::clone(&db);
+                let db_path = Arc::clone(&db_path);
+                let wal_path = Arc::clone(&wal_path);
+                let connection_count = Arc::clone(&connection_count);
 
-                stream.write_all(b"rustdb v0.3.0 ready\n").ok();
-
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut line = String::new();
-
-                loop {
-                    line.clear();
-                    let bytes_read = reader.read_line(&mut line).unwrap_or(0);
-                    if bytes_read == 0 {
-                        break;
-                    }
-
-                    let input = line.trim();
-                    if input.is_empty() {
-                        continue;
-                    }
-
-                    if input == ".exit" {
-                        stream.write_all(b"bye\n--END--\n").ok();
-                        break;
-                    }
-
-                    if input == ".quit" {
-                        stream.write_all(b"shutting down server\n--END--\n").ok();
-                        println!("{}", "← server shutting down".yellow());
-                        return;
-                    }
-
-                    if input.starts_with(".bench") {
-                        stream
-                            .write_all(b"bench not supported in server mode\n--END--\n")
-                            .ok();
-                        continue;
-                    }
-
-                    if input == ".tables" {
-                        let tables = db.table_names();
-                        let mut response = String::new();
-                        if tables.is_empty() {
-                            response.push_str("(no tables)\n");
-                        } else {
-                            response.push_str("Tables in database:\n");
-                            for t in tables {
-                                response.push_str(&format!("  • {}\n", t));
-                            }
-                        }
-                        response.push_str("--END--\n");
-                        stream.write_all(response.as_bytes()).ok();
-                        continue;
-                    }
-
-                    if input.starts_with(".schema") {
-                        let table_name = input.trim_start_matches(".schema").trim();
-                        let mut response = String::new();
-                        if table_name.is_empty() {
-                            response.push_str("Usage: .schema <table_name>\n");
-                        } else if let Some(table) = db.get_table(table_name) {
-                            response.push_str(&format!("Table: {}\n", table_name));
-                            for col in &table.columns {
-                                let type_str = match col.data_type {
-                                    crate::parser::DataType::Int => "INT",
-                                    crate::parser::DataType::Text => "TEXT",
-                                    crate::parser::DataType::Float => "FLOAT",
-                                    crate::parser::DataType::Boolean => "BOOLEAN",
-                                };
-                                response.push_str(&format!("  {:<12} {}\n", col.name, type_str));
-                            }
-                        } else {
-                            response.push_str(&format!("Table '{}' not found\n", table_name));
-                        }
-                        response.push_str("--END--\n");
-                        stream.write_all(response.as_bytes()).ok();
-                        continue;
-                    }
-
-                    if input == ".stats" {
-                        let tables = db.table_count();
-                        let total_rows: usize = db
-                            .table_names()
-                            .iter()
-                            .filter_map(|t| db.get_table(t))
-                            .map(|t| t.rows.inorder().len())
-                            .sum();
-                        let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-                        let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-                        let response = format!(
-                            "Database stats:\n  Tables     : {}\n  Total rows : {}\n  File size  : {} bytes\n  WAL size   : {} bytes\n--END--\n",
-                            tables, total_rows, db_size, wal_size
-                        );
-                        stream.write_all(response.as_bytes()).ok();
-                        continue;
-                    }
-
-                    if input == ".help" {
-                        let response = "REPL Commands:\n  .tables      - List all tables\n  .schema <t>  - Show table schema\n  .stats       - Show database statistics\n  .help        - Show this help message\n  .exit        - Disconnect\n  .quit        - Shutdown server\n--END--\n";
-                        stream.write_all(response.as_bytes()).ok();
-                        continue;
-                    }
-
-                    let tokens = lexer::tokenize(input);
-                    match parser::parse(tokens) {
-                        Ok(stmt) => {
-                            let is_mutation = matches!(
-                                stmt,
-                                Statement::CreateTable { .. }
-                                    | Statement::Insert { .. }
-                                    | Statement::Delete { .. }
-                                    | Statement::Update { .. }
-                                    | Statement::CreateIndex { .. }
-                                    | Statement::DropIndex { .. }
-                            );
-
-                            if is_mutation {
-                                let wal_entry = match &stmt {
-                                    Statement::CreateTable { table, columns } => {
-                                        WalEntry::CreateTable {
-                                            table: table.clone(),
-                                            columns: columns.clone(),
-                                        }
-                                    }
-                                    Statement::Insert { table, values } => WalEntry::Insert {
-                                        table: table.clone(),
-                                        values: values.clone(),
-                                    },
-                                    Statement::Delete { table, condition } => WalEntry::Delete {
-                                        table: table.clone(),
-                                        condition: condition.clone(),
-                                    },
-                                    Statement::Update {
-                                        table,
-                                        column,
-                                        value,
-                                        condition,
-                                    } => WalEntry::Update {
-                                        table: table.clone(),
-                                        column: column.clone(),
-                                        value: value.clone(),
-                                        condition: condition.clone(),
-                                    },
-                                    Statement::CreateIndex {
-                                        index_name,
-                                        table,
-                                        column,
-                                    } => WalEntry::CreateIndex {
-                                        index_name: index_name.clone(),
-                                        table: table.clone(),
-                                        column: column.clone(),
-                                    },
-                                    Statement::DropIndex { index_name } => WalEntry::DropIndex {
-                                        index_name: index_name.clone(),
-                                    },
-                                    _ => continue,
-                                };
-
-                                wal::append(&wal_path, &wal_entry).ok();
-                            }
-
-                            match execute_server(&mut db, stmt) {
-                                Ok(result) => {
-                                    stream.write_all(result.as_bytes()).ok();
-                                    stream.write_all(b"\n--END--\n").ok();
-
-                                    if is_mutation {
-                                        if db.save(&db_path).is_ok() {
-                                            wal::append(&wal_path, &WalEntry::Checkpoint).ok();
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    stream
-                                        .write_all(format!("✗ {}\n--END--\n", e).as_bytes())
-                                        .ok();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            stream
-                                .write_all(format!("✗ Parse error: {}\n--END--\n", e).as_bytes())
-                                .ok();
-                        }
-                    }
+                {
+                    let mut count = connection_count.lock().unwrap();
+                    *count += 1;
                 }
 
-                println!("{}", "← client disconnected".yellow());
+                std::thread::spawn(move || {
+                    handle_client(stream, db, db_path, wal_path, connection_count);
+                });
             }
             Err(e) => {
                 eprintln!("Connection failed: {}", e);
             }
         }
     }
+}
+
+fn handle_client(
+    mut stream: TcpStream,
+    db: Arc<Mutex<Database>>,
+    db_path: Arc<String>,
+    wal_path: Arc<String>,
+    connection_count: Arc<Mutex<usize>>,
+) {
+    let peer = stream.peer_addr().unwrap();
+    let active = {
+        let count = connection_count.lock().unwrap();
+        *count
+    };
+    println!(
+        "{}",
+        format!("→ client connected: {} ({} active)", peer, active).cyan()
+    );
+
+    stream.write_all(b"rustdb v0.3.0 ready\n").ok();
+
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).unwrap_or(0);
+        if bytes_read == 0 {
+            break;
+        }
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        if input == ".exit" {
+            stream.write_all(b"bye\n--END--\n").ok();
+            break;
+        }
+
+        if input == ".quit" {
+            stream.write_all(b"shutting down server\n--END--\n").ok();
+            println!("{}", "← server shutting down".yellow());
+            return;
+        }
+
+        if input.starts_with(".bench") {
+            stream
+                .write_all(b"bench not supported in server mode\n--END--\n")
+                .ok();
+            continue;
+        }
+
+        if input == ".tables" {
+            let tables = {
+                let db = db.lock().unwrap();
+                db.table_names()
+            };
+            let mut response = String::new();
+            if tables.is_empty() {
+                response.push_str("(no tables)\n");
+            } else {
+                response.push_str("Tables in database:\n");
+                for t in tables {
+                    response.push_str(&format!("  • {}\n", t));
+                }
+            }
+            response.push_str("--END--\n");
+            stream.write_all(response.as_bytes()).ok();
+            continue;
+        }
+
+        if input.starts_with(".schema") {
+            let table_name = input.trim_start_matches(".schema").trim();
+            let mut response = String::new();
+            if table_name.is_empty() {
+                response.push_str("Usage: .schema <table_name>\n");
+            } else {
+                let table = {
+                    let db = db.lock().unwrap();
+                    db.get_table(table_name).cloned()
+                };
+                if let Some(table) = table {
+                    response.push_str(&format!("Table: {}\n", table_name));
+                    for col in &table.columns {
+                        let type_str = match col.data_type {
+                            crate::parser::DataType::Int => "INT",
+                            crate::parser::DataType::Text => "TEXT",
+                            crate::parser::DataType::Float => "FLOAT",
+                            crate::parser::DataType::Boolean => "BOOLEAN",
+                        };
+                        response.push_str(&format!("  {:<12} {}\n", col.name, type_str));
+                    }
+                } else {
+                    response.push_str(&format!("Table '{}' not found\n", table_name));
+                }
+            }
+            response.push_str("--END--\n");
+            stream.write_all(response.as_bytes()).ok();
+            continue;
+        }
+
+        if input == ".stats" {
+            let (tables, total_rows, db_size, wal_size) = {
+                let db = db.lock().unwrap();
+                let tables = db.table_count();
+                let total_rows: usize = db
+                    .table_names()
+                    .iter()
+                    .filter_map(|t| db.get_table(t))
+                    .map(|t| t.rows.inorder().len())
+                    .sum();
+                let db_size = std::fs::metadata(db_path.as_str())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let wal_size = std::fs::metadata(wal_path.as_str())
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                (tables, total_rows, db_size, wal_size)
+            };
+            let response = format!(
+                "Database stats:\n  Tables     : {}\n  Total rows : {}\n  File size  : {} bytes\n  WAL size   : {} bytes\n--END--\n",
+                tables, total_rows, db_size, wal_size
+            );
+            stream.write_all(response.as_bytes()).ok();
+            continue;
+        }
+
+        if input == ".help" {
+            let response = "REPL Commands:\n  .tables      - List all tables\n  .schema <t>  - Show table schema\n  .stats       - Show database statistics\n  .help        - Show this help message\n  .exit        - Disconnect\n  .quit        - Shutdown server\n--END--\n";
+            stream.write_all(response.as_bytes()).ok();
+            continue;
+        }
+
+        let tokens = lexer::tokenize(input);
+        let stmt = match parser::parse(tokens) {
+            Ok(s) => s,
+            Err(e) => {
+                stream
+                    .write_all(format!("✗ Parse error: {}\n--END--\n", e).as_bytes())
+                    .ok();
+                continue;
+            }
+        };
+
+        let is_mutation = matches!(
+            stmt,
+            Statement::CreateTable { .. }
+                | Statement::Insert { .. }
+                | Statement::Delete { .. }
+                | Statement::Update { .. }
+                | Statement::CreateIndex { .. }
+                | Statement::DropIndex { .. }
+        );
+
+        let wal_entry = if is_mutation {
+            Some(match &stmt {
+                Statement::CreateTable { table, columns } => WalEntry::CreateTable {
+                    table: table.clone(),
+                    columns: columns.clone(),
+                },
+                Statement::Insert { table, values } => WalEntry::Insert {
+                    table: table.clone(),
+                    values: values.clone(),
+                },
+                Statement::Delete { table, condition } => WalEntry::Delete {
+                    table: table.clone(),
+                    condition: condition.clone(),
+                },
+                Statement::Update {
+                    table,
+                    column,
+                    value,
+                    condition,
+                } => WalEntry::Update {
+                    table: table.clone(),
+                    column: column.clone(),
+                    value: value.clone(),
+                    condition: condition.clone(),
+                },
+                Statement::CreateIndex {
+                    index_name,
+                    table,
+                    column,
+                } => WalEntry::CreateIndex {
+                    index_name: index_name.clone(),
+                    table: table.clone(),
+                    column: column.clone(),
+                },
+                Statement::DropIndex { index_name } => WalEntry::DropIndex {
+                    index_name: index_name.clone(),
+                },
+                _ => continue,
+            })
+        } else {
+            None
+        };
+
+        let (result, should_save) = {
+            let mut db = db.lock().unwrap();
+
+            if let Some(ref entry) = wal_entry {
+                wal::append(&wal_path, entry).ok();
+            }
+
+            let result = execute_server(&mut db, stmt);
+            let should_save = if is_mutation {
+                db.save(&db_path).is_ok()
+            } else {
+                false
+            };
+            (result, should_save)
+        };
+
+        match result {
+            Ok(res) => {
+                stream.write_all(res.as_bytes()).ok();
+                stream.write_all(b"\n--END--\n").ok();
+
+                if should_save {
+                    wal::append(&wal_path, &WalEntry::Checkpoint).ok();
+                }
+            }
+            Err(e) => {
+                stream
+                    .write_all(format!("✗ {}\n--END--\n", e).as_bytes())
+                    .ok();
+            }
+        }
+    }
+
+    {
+        let mut count = connection_count.lock().unwrap();
+        *count -= 1;
+    }
+
+    let active = {
+        let count = connection_count.lock().unwrap();
+        *count
+    };
+    println!(
+        "{}",
+        format!("← client disconnected ({} active)", active).yellow()
+    );
 }
 
 fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> {
