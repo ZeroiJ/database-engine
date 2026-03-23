@@ -91,56 +91,56 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     println!();
     println!(
         "{}",
-        "╔══════════════════════════════════════════════════╗".cyan()
+        "╔══════════════════════════════════════════════════════════╗".cyan()
     );
     println!(
         "{}",
-        "║                                                  ║".cyan()
+        "║                                                          ║".cyan()
     );
     println!(
         "{}",
-        "║  ██████╗ ██╗   ██╗███████╗████████╗██████╗      ║"
+        "║  ██████╗ ██╗   ██╗███████╗████████╗██████╗  ██████╗     ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "║  ██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔══██╗     ║"
+        "║  ██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔══██╗██╔══██╗     ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "║  ██████╔╝██║   ██║███████╗   ██║   ██║  ██║     ║"
+        "║  ██████╔╝██║   ██║███████╗   ██║   ██║  ██║███████║     ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "║  ██╔══██╗██║   ██║╚════██║   ██║   ██║  ██║     ║"
+        "║  ██╔══██╗██║   ██║╚════██║   ██║   ██║  ██║██╔══██║     ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "║  ██║  ██║╚██████╔╝███████║   ██║   ██████╔╝     ║"
+        "║  ██║  ██║╚██████╔╝███████║   ██║   ██████╔╝███████║     ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "║  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═════╝      ║"
+        "║  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═════╝ ╚════╝      ║"
             .cyan()
             .bold()
     );
     println!(
         "{}",
-        "╠══════════════════════════════════════════════════╣".cyan()
+        "╠══════════════════════════════════════════════════════════╣".cyan()
     );
     println!(
         "{}",
         format!(
-            "║  {}  •  {}  •  {}          ║",
+            "║  {}  •  {}  •  {}                ║",
             "v0.4.0".bold().yellow(),
             "by Sujal".bold().white(),
             "built in Rust".dimmed()
@@ -149,12 +149,12 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     );
     println!(
         "{}",
-        "╠══════════════════════════════════════════════════╣".cyan()
+        "╠══════════════════════════════════════════════════════════╣".cyan()
     );
     println!(
         "{}",
         format!(
-            "║  {} {:<40} ║",
+            "║  {} {:<48} ║",
             "database".dimmed(),
             db_path.bold().yellow()
         )
@@ -163,7 +163,7 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     println!(
         "{}",
         format!(
-            "║  {} {:<40} ║",
+            "║  {} {:<48} ║",
             "tables".dimmed(),
             table_count.to_string().bold().green()
         )
@@ -173,7 +173,7 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
         println!(
             "{}",
             format!(
-                "║  {} {:<40} ║",
+                "║  {} {:<48} ║",
                 "recovery".dimmed(),
                 format!("replayed {} ops", wal_recovered).bold().yellow()
             )
@@ -183,7 +183,7 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     println!(
         "{}",
         format!(
-            "║  {} {:<40} ║",
+            "║  {} {:<48} ║",
             "status".dimmed(),
             if is_new {
                 "new database".bold().yellow()
@@ -195,7 +195,7 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     );
     println!(
         "{}",
-        "╚══════════════════════════════════════════════════╝".cyan()
+        "╚══════════════════════════════════════════════════════════╝".cyan()
     );
     println!();
 }
@@ -410,19 +410,19 @@ fn main() {
                         println!("{}", "(no tables yet — try CREATE TABLE)".dimmed().italic());
                     } else {
                         let count = tables.len();
-                        println!("{}", "┌─────────────────────────────┐".cyan());
+                        println!("{}", "┌─────────────────────────────────┐".cyan());
                         println!(
-                            "{} {} {}{}",
+                            "{} {} {} {}",
                             "│".cyan(),
                             "Tables".bold().yellow(),
                             format!("({})", count).bold().green(),
-                            " ".repeat(18 - count.to_string().len() - 1) + "│"
+                            "│".cyan()
                         );
-                        println!("{}", "├─────────────────────────────┤".cyan());
+                        println!("{}", "├─────────────────────────────────┤".cyan());
                         for t in tables {
-                            println!("{}  {} {:<19}│", "│".cyan(), "•".cyan(), t.white());
+                            println!("{}  {} {:<25}│", "│".cyan(), "•".cyan(), t.white());
                         }
-                        println!("{}", "└─────────────────────────────┘".cyan());
+                        println!("{}", "└─────────────────────────────────┘".cyan());
                     }
                     continue;
                 }
