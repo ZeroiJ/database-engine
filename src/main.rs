@@ -475,9 +475,11 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             table,
             columns,
             condition,
+            order_by,
+            limit,
         } => {
             let table_name = table.clone();
-            let (rows, index_used) = db.select(table, columns, condition)?;
+            let (rows, index_used) = db.select(table, columns, condition, order_by, limit)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
             let base_output = format_table(&table_meta.columns, &rows);
             let table_output = if index_used {
@@ -594,6 +596,8 @@ fn run_benchmark(db: &mut Database, n: usize) {
             operator: Operator::Eq,
             value: Value::Integer(42),
         })),
+        None,
+        None,
     );
     let select_full_time = select_full_start.elapsed();
 
@@ -606,6 +610,8 @@ fn run_benchmark(db: &mut Database, n: usize) {
             operator: Operator::Eq,
             value: Value::Integer((n / 2) as i64),
         })),
+        None,
+        None,
     );
     let select_id_time = select_id_start.elapsed();
 
@@ -626,6 +632,8 @@ fn run_benchmark(db: &mut Database, n: usize) {
             operator: Operator::Eq,
             value: Value::Integer(42),
         })),
+        None,
+        None,
     );
     let select_index_time = select_index_start.elapsed();
 

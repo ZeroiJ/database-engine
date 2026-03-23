@@ -256,6 +256,8 @@ impl Database {
         table: String,
         columns: Vec<String>,
         condition: Option<WhereClause>,
+        order_by: Option<(String, bool)>,
+        limit: Option<usize>,
     ) -> Result<(Vec<Row>, bool), String> {
         let table = self
             .tables
@@ -278,7 +280,7 @@ impl Database {
         };
 
         let mut used_index = false;
-        let results: Vec<Row>;
+        let mut results: Vec<Row>;
 
         if let Some(ref where_clause) = condition {
             if Self::has_indexed_range_condition(where_clause, &table) {
@@ -403,6 +405,31 @@ impl Database {
                 .iter()
                 .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
                 .collect();
+        }
+
+        if let Some((ref order_col, ascending)) = order_by {
+            if let Some(col_idx) = table.columns.iter().position(|c| &c.name == order_col) {
+                results.sort_by(|a, b| {
+                    let a_val = a.get(col_idx);
+                    let b_val = b.get(col_idx);
+                    match (a_val, b_val) {
+                        (Some(av), Some(bv)) => {
+                            let cmp = Self::compare_values(av, bv);
+                            let ord = cmp.unwrap_or(std::cmp::Ordering::Equal);
+                            if ascending {
+                                ord
+                            } else {
+                                ord.reverse()
+                            }
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+        }
+
+        if let Some(n) = limit {
+            results.truncate(n);
         }
 
         Ok((results, used_index))
@@ -788,7 +815,7 @@ mod tests {
         .unwrap();
 
         let (result, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(result.len(), 2);
 
@@ -801,6 +828,8 @@ mod tests {
                     operator: Operator::Gt,
                     value: Value::Integer(1),
                 })),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(result_with_cond.len(), 1);
@@ -858,6 +887,8 @@ mod tests {
                         value: Value::Boolean(true),
                     })),
                 )),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(res_and.len(), 1);
@@ -879,6 +910,8 @@ mod tests {
                         value: Value::Integer(3),
                     })),
                 )),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(res_or.len(), 2);
@@ -923,7 +956,7 @@ mod tests {
         assert_eq!(deleted, 1);
 
         let (remaining, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(remaining.len(), 1);
     }
@@ -984,7 +1017,7 @@ mod tests {
         assert_eq!(deleted, 2);
 
         let (remaining, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(remaining.len(), 1);
     }
@@ -1023,7 +1056,7 @@ mod tests {
         let loaded_db = Database::load(path).unwrap();
 
         let (result, _) = loaded_db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -1065,7 +1098,7 @@ mod tests {
         assert_eq!(updated, 2);
 
         let (result, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0][1], Value::Text("changed".to_string()));
@@ -1113,7 +1146,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         let (result, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0][1], Value::Text("updated".to_string()));
@@ -1187,7 +1220,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         let (result, _) = db
-            .select("users".to_string(), vec!["*".to_string()], None)
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
             .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0][3], Value::Boolean(false));
@@ -1277,6 +1310,8 @@ mod tests {
                     operator: Operator::Gt,
                     value: Value::Integer(25),
                 })),
+                None,
+                None,
             )
             .unwrap();
 
@@ -1337,6 +1372,8 @@ mod tests {
                     operator: Operator::Lt,
                     value: Value::Integer(22),
                 })),
+                None,
+                None,
             )
             .unwrap();
 
@@ -1346,6 +1383,243 @@ mod tests {
             if let Value::Integer(age) = row[1] {
                 assert!(age < 22);
             }
+        }
+    }
+
+    #[test]
+    fn test_select_order_by_asc() {
+        let mut db = Database::new();
+        db.create_table(
+            "users".to_string(),
+            vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                },
+                ColumnDef {
+                    name: "age".to_string(),
+                    data_type: DataType::Int,
+                },
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Integer(30)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Integer(20)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(3), Value::Integer(25)],
+        )
+        .unwrap();
+
+        let (result, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                None,
+                Some(("age".to_string(), true)),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 3);
+        if let Value::Integer(age) = result[0][1] {
+            assert_eq!(age, 20);
+        }
+        if let Value::Integer(age) = result[1][1] {
+            assert_eq!(age, 25);
+        }
+        if let Value::Integer(age) = result[2][1] {
+            assert_eq!(age, 30);
+        }
+    }
+
+    #[test]
+    fn test_select_order_by_desc() {
+        let mut db = Database::new();
+        db.create_table(
+            "users".to_string(),
+            vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                },
+                ColumnDef {
+                    name: "age".to_string(),
+                    data_type: DataType::Int,
+                },
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Integer(30)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Integer(20)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(3), Value::Integer(25)],
+        )
+        .unwrap();
+
+        let (result, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                None,
+                Some(("age".to_string(), false)),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 3);
+        if let Value::Integer(age) = result[0][1] {
+            assert_eq!(age, 30);
+        }
+        if let Value::Integer(age) = result[1][1] {
+            assert_eq!(age, 25);
+        }
+        if let Value::Integer(age) = result[2][1] {
+            assert_eq!(age, 20);
+        }
+    }
+
+    #[test]
+    fn test_select_limit() {
+        let mut db = Database::new();
+        db.create_table(
+            "users".to_string(),
+            vec![ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            }],
+        )
+        .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(1)])
+            .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(2)])
+            .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(3)])
+            .unwrap();
+
+        let (result, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                None,
+                None,
+                Some(2),
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_select_order_by_limit() {
+        let mut db = Database::new();
+        db.create_table(
+            "users".to_string(),
+            vec![ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            }],
+        )
+        .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(30)])
+            .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(20)])
+            .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(25)])
+            .unwrap();
+        db.insert("users".to_string(), vec![Value::Integer(15)])
+            .unwrap();
+
+        let (result, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                None,
+                Some(("age".to_string(), false)),
+                Some(2),
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        if let Value::Integer(age) = result[0][0] {
+            assert_eq!(age, 30);
+        }
+        if let Value::Integer(age) = result[1][0] {
+            assert_eq!(age, 25);
+        }
+    }
+
+    #[test]
+    fn test_select_where_order_by_limit() {
+        let mut db = Database::new();
+        db.create_table(
+            "users".to_string(),
+            vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: DataType::Int,
+                },
+                ColumnDef {
+                    name: "active".to_string(),
+                    data_type: DataType::Boolean,
+                },
+                ColumnDef {
+                    name: "age".to_string(),
+                    data_type: DataType::Int,
+                },
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1), Value::Boolean(true), Value::Integer(25)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(2), Value::Boolean(false), Value::Integer(30)],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![Value::Integer(3), Value::Boolean(true), Value::Integer(20)],
+        )
+        .unwrap();
+
+        let (result, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "active".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Boolean(true),
+                })),
+                Some(("age".to_string(), true)),
+                Some(1),
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        if let Value::Integer(age) = result[0][2] {
+            assert_eq!(age, 20);
         }
     }
 }

@@ -259,9 +259,11 @@ fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> 
             table,
             columns,
             condition,
+            order_by,
+            limit,
         } => {
             let table_name = table.clone();
-            let (rows, _) = db.select(table, columns, condition)?;
+            let (rows, _) = db.select(table, columns, condition, order_by, limit)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
             Ok(format_table_plain(&table_meta.columns, &rows))
         }

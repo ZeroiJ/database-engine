@@ -7,6 +7,8 @@ pub enum Statement {
         table: String,
         columns: Vec<String>,
         condition: Option<WhereClause>,
+        order_by: Option<(String, bool)>,
+        limit: Option<usize>,
     },
     Insert {
         table: String,
@@ -143,6 +145,46 @@ fn parse_select(
         None
     };
 
+    let order_by = if let Some(&Token::Order) = tokens.peek() {
+        tokens.next();
+        match tokens.next() {
+            Some(Token::By) => {}
+            Some(tok) => return Err(format!("Expected BY after ORDER, got: {:?}", tok)),
+            None => return Err("Unexpected end of input".to_string()),
+        }
+        let column = match tokens.next() {
+            Some(Token::Ident(name)) => name,
+            Some(tok) => return Err(format!("Expected column name, got: {:?}", tok)),
+            None => return Err("Unexpected end of input".to_string()),
+        };
+        let ascending = match tokens.peek() {
+            Some(&Token::Asc) => {
+                tokens.next();
+                true
+            }
+            Some(&Token::Desc) => {
+                tokens.next();
+                false
+            }
+            _ => true,
+        };
+        Some((column, ascending))
+    } else {
+        None
+    };
+
+    let limit = if let Some(&Token::Limit) = tokens.peek() {
+        tokens.next();
+        let n = match tokens.next() {
+            Some(Token::Number(n)) => n,
+            Some(tok) => return Err(format!("Expected number after LIMIT, got: {:?}", tok)),
+            None => return Err("Unexpected end of input".to_string()),
+        };
+        Some(n as usize)
+    } else {
+        None
+    };
+
     match tokens.next() {
         Some(Token::Eof) | None => {}
         Some(tok) => return Err(format!("Unexpected token after statement: {:?}", tok)),
@@ -152,6 +194,8 @@ fn parse_select(
         table,
         columns,
         condition,
+        order_by,
+        limit,
     })
 }
 
@@ -526,6 +570,8 @@ mod tests {
                 table: "users".to_string(),
                 columns: vec!["*".to_string()],
                 condition: None,
+                order_by: None,
+                limit: None,
             }
         );
     }
@@ -582,6 +628,8 @@ mod tests {
                     operator: Operator::Gt,
                     value: Value::Integer(18),
                 })),
+                order_by: None,
+                limit: None,
             }
         );
     }
@@ -635,5 +683,94 @@ mod tests {
         let tokens = tokenize("SELECT * FROM users WHERE a = 1 OR b = 2 OR c = 3");
         let result = parse(tokens);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_select_order_by_asc() {
+        let tokens = tokenize("SELECT * FROM users ORDER BY age ASC");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Statement::Select {
+            order_by, limit, ..
+        } = stmt
+        {
+            assert_eq!(order_by, Some(("age".to_string(), true)));
+            assert_eq!(limit, None);
+        } else {
+            panic!("Expected Select statement");
+        }
+    }
+
+    #[test]
+    fn test_select_order_by_desc() {
+        let tokens = tokenize("SELECT * FROM users ORDER BY age DESC");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Statement::Select {
+            order_by, limit, ..
+        } = stmt
+        {
+            assert_eq!(order_by, Some(("age".to_string(), false)));
+            assert_eq!(limit, None);
+        } else {
+            panic!("Expected Select statement");
+        }
+    }
+
+    #[test]
+    fn test_select_limit() {
+        let tokens = tokenize("SELECT * FROM users LIMIT 10");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Statement::Select {
+            order_by, limit, ..
+        } = stmt
+        {
+            assert_eq!(order_by, None);
+            assert_eq!(limit, Some(10));
+        } else {
+            panic!("Expected Select statement");
+        }
+    }
+
+    #[test]
+    fn test_select_order_by_limit() {
+        let tokens = tokenize("SELECT * FROM users ORDER BY age DESC LIMIT 5");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Statement::Select {
+            order_by, limit, ..
+        } = stmt
+        {
+            assert_eq!(order_by, Some(("age".to_string(), false)));
+            assert_eq!(limit, Some(5));
+        } else {
+            panic!("Expected Select statement");
+        }
+    }
+
+    #[test]
+    fn test_select_where_order_by_limit() {
+        let tokens = tokenize("SELECT * FROM users WHERE active = true ORDER BY age ASC LIMIT 1");
+        let result = parse(tokens);
+        assert!(result.is_ok());
+        let stmt = result.unwrap();
+        if let Statement::Select {
+            order_by,
+            limit,
+            condition,
+            ..
+        } = stmt
+        {
+            assert_eq!(order_by, Some(("age".to_string(), true)));
+            assert_eq!(limit, Some(1));
+            assert!(condition.is_some());
+        } else {
+            panic!("Expected Select statement");
+        }
     }
 }

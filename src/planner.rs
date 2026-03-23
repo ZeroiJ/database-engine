@@ -15,15 +15,19 @@ pub struct QueryPlan {
     pub estimated_rows: usize,
     pub total_rows: usize,
     pub condition: Option<String>,
+    pub order_by: Option<String>,
+    pub limit: Option<usize>,
 }
 
 pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
-    let (table, condition) = match stmt {
+    let (table, condition, order_by, limit) = match stmt {
         Statement::Select {
             table,
             columns: _,
             condition,
-        } => (table.clone(), condition.clone()),
+            order_by,
+            limit,
+        } => (table.clone(), condition.clone(), order_by.clone(), *limit),
         _ => return None,
     };
 
@@ -150,6 +154,9 @@ pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
         estimated_rows,
         total_rows,
         condition: condition_str,
+        order_by: order_by
+            .map(|(col, asc)| format!("{} {}", col, if asc { "ASC" } else { "DESC" })),
+        limit,
     })
 }
 
@@ -253,6 +260,17 @@ pub fn format_plan(plan: &QueryPlan) -> String {
         ));
     }
 
+    if let Some(order_by) = &plan.order_by {
+        output.push_str(&format!(
+            "│  {:<36} │\n",
+            format!("Order By   : {}", order_by)
+        ));
+    }
+
+    if let Some(limit) = &plan.limit {
+        output.push_str(&format!("│  {:<36} │\n", format!("Limit      : {}", limit)));
+    }
+
     output.push_str(&format!(
         "│  {:<36} │\n",
         format!(
@@ -276,6 +294,8 @@ mod tests {
             table: "users".to_string(),
             columns: vec!["*".to_string()],
             condition: None,
+            order_by: None,
+            limit: None,
         };
         let result = plan(&db, &stmt);
         assert!(result.is_none());
