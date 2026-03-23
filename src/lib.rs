@@ -32,16 +32,20 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
 
     let count = entries_to_replay.len();
 
-    for entry in entries_to_replay {
+    for entry in &entries_to_replay {
+        if let WalEntry::CreateTable { table, columns } = entry {
+            db.create_table(table.clone(), columns.clone()).ok();
+        }
+    }
+
+    for entry in &entries_to_replay {
         match entry {
-            WalEntry::CreateTable { table, columns } => {
-                db.create_table(table, columns)?;
-            }
+            WalEntry::CreateTable { .. } => {}
             WalEntry::Insert { table, values } => {
-                db.insert(table, values)?;
+                db.insert(table.clone(), values.clone()).ok();
             }
             WalEntry::Delete { table, condition } => {
-                db.delete(table, condition)?;
+                db.delete(table.clone(), condition.clone()).ok();
             }
             WalEntry::Update {
                 table,
@@ -49,19 +53,26 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
                 value,
                 condition,
             } => {
-                db.update(table, column, value, condition)?;
+                db.update(
+                    table.clone(),
+                    column.clone(),
+                    value.clone(),
+                    condition.clone(),
+                )
+                .ok();
             }
-            WalEntry::Checkpoint => {}
             WalEntry::CreateIndex {
                 index_name,
                 table,
                 column,
             } => {
-                db.create_index(table, index_name, column)?;
+                db.create_index(table.clone(), index_name.clone(), column.clone())
+                    .ok();
             }
             WalEntry::DropIndex { index_name } => {
-                db.drop_index(index_name)?;
+                db.drop_index(index_name.clone()).ok();
             }
+            WalEntry::Checkpoint => {}
         }
     }
 
