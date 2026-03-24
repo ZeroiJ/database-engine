@@ -11,6 +11,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [v0.4.1] - 2026-03-24
+
+### Fixed
+- WAL recovery now uses two-pass replay — CreateTable entries are always
+  replayed before Insert/Update/Delete entries, fixing "Table not found"
+  errors during crash recovery
+- WAL checkpoint logic fixed — recovery no longer skips CreateTable entries
+  that occurred before the last checkpoint
+- Server panic on unexpected statement replaced with graceful error response
+- Main REPL panic on unexpected statement replaced with graceful error print
+- Multiline TCP responses now use --END-- terminator so client reads full
+  table output instead of just the first line
+- CreateIndex and DropIndex now logged to WAL (previously missing, caused
+  index loss on crash)
+- TcpListener bind failure now shows friendly error instead of panic
+- Database load failure now shows friendly error instead of panic
+- B-Tree root promotion loop fixed — correctly traverses to deepest child
+- ASCII logo now shows full RUSTDB instead of truncated RUSTD
+
+### Performance (benchmarked on 53,110 real rows)
+- INSERT speed         : ~1,075,507 rows/sec (dev build, unoptimized)
+- SELECT with index    : 0.0ms (instantaneous)
+- SELECT full scan     : 45.7ms on 53k rows
+- SELECT index scan    : 7.4ms on 53k rows  (6x faster than full scan)
+- SELECT range scan    : 25.6ms on 53k rows (2.5x faster than full scan)
+- CREATE INDEX 53k rows: ~100ms
+- B-Tree depth 50k rows: 8-10 levels
+
+### Added
+- Visual polish — full ASCII logo banner (RUSTDB in block letters)
+- WAL recovery status shown inside startup banner
+- .stats now shows B-Tree depth across all tables
+- .tables output now uses bordered box with row count
+- .schema output now shows column types in different colors per type
+- .help output redesigned with full SQL syntax reference
+- EXPLAIN output redesigned with colored labels and arrows
+- All error messages use ✗ bold red, success messages use ✓ bold green
+- Query result footer shows scan type [INDEX_SCAN] or [FULL_SCAN]
+- File sizes formatted as bytes/KB/MB automatically
+- Row counts formatted with thousands separators (1,243 not 1243)
+
+### Real World Test
+- Successfully loaded and queried 53,110 rows from a crash-recovered WAL
+- WAL file size during crash: 9.2MB containing ~106k operations
+- Database file size at 53k rows: 38.7MB
+- Crash recovery correctly replayed all checkpointed operations
+
+---
+
+## [0.4.0] - 2026-03-23
+
+### Added
+
+#### REPL Dot Commands
+- **`.tables`** - List all tables in the database
+- **`.schema <table>`** - Show column definitions for a specific table
+- **`.clear`** - Clear the terminal screen
+- **`.stats`** - Display database statistics (table counts, row counts, index info)
+- **`.help`** - Show available dot commands
+- All dot commands work in both REPL and server mode
+
+#### SQL ORDER BY and LIMIT
+- **ORDER BY clause**: Sort results by any column (ASC/DESC)
+  - `SELECT * FROM users ORDER BY age`
+  - `SELECT * FROM users ORDER BY name DESC`
+- **LIMIT clause**: Restrict number of returned rows
+  - `SELECT * FROM users LIMIT 10`
+  - `SELECT * FROM users ORDER BY id DESC LIMIT 5`
+- Full lexer support: `Order`, `By`, `Limit`, `Asc`, `Desc` tokens
+- Parser integration: `order_by` and `limit` fields in `Statement::Select`
+- Storage layer: In-memory sorting for ORDER BY results
+
+#### Multi-Client Server Concurrency
+- **Thread-per-connection model**: Each client gets its own thread
+- **Shared database**: `Arc<Mutex<Database>>` for safe concurrent access
+- **Connection counter**: Shows active connections in server status
+- **Connection tracking**: Unique client IDs assigned per connection
+- Server now handles multiple simultaneous clients correctly
+
+#### Standalone Server Binary
+- Created `rustdb-server` command as separate binary
+- `src/server_bin.rs` - Standalone entry point
+- Updated `Cargo.toml` with `[lib]` section and binary targets
+- `default-run = "rustdb"` maintains REPL as default
+
+#### Development Tools
+- **justfile**: Added dev shortcuts for common tasks
+  - `just run` - Run REPL
+  - `just server` - Run server
+  - `just build` - Build project
+  - `just test` - Run tests
+- **INSTALL.md**: Installation and usage guide
+
+#### Visual Polish
+- **ASCII banner**: "RUSTDB" banner on startup
+- **Colored output**: SQL keywords, strings, numbers color-coded
+- **Formatted tables**: Box-drawing characters for query results
+- **Connection status**: Active connection count in server mode
+
+### Fixed
+
+#### WAL Recovery Two-Pass Replay
+- Fixed WAL recovery to properly replay entire WAL file
+- **Pass 1**: Replay `CreateTable` entries first (table creation must precede data)
+- **Pass 2**: Replay all other entries (Insert, Delete, Update)
+- Previously skipped entries before checkpoints incorrectly
+- Now correctly recovers all uncommitted changes on crash
+
+#### ASCII Banner Fix
+- Fixed banner display showing "RUSTDB" instead of "RUSTD"
+
+#### Table Display Alignment
+- Fixed `.tables` box drawing character alignment
+
+### Build Status
+- 53 tests pass
+- All features work in both REPL and server mode
+- Tagged v0.4.0 on main branch
+
+---
+
 ## [0.3.0] - 2026-03-19
 
 ### Added

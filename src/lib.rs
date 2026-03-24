@@ -19,33 +19,33 @@ pub fn wal_path(db_path: &str) -> String {
 }
 
 pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
-    let entries = wal::read(wal_path)?;
+    let all_entries = wal::read(wal_path)?;
 
-    let mut entries_to_replay: Vec<WalEntry> = Vec::new();
-    for entry in entries.into_iter().rev() {
-        if matches!(entry, WalEntry::Checkpoint) {
-            break;
-        }
-        entries_to_replay.push(entry);
-    }
-    entries_to_replay.reverse();
+    let mut created_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let count = entries_to_replay.len();
-
-    for entry in &entries_to_replay {
+    for entry in &all_entries {
         if let WalEntry::CreateTable { table, columns } = entry {
-            db.create_table(table.clone(), columns.clone()).ok();
+            if db.create_table(table.clone(), columns.clone()).is_ok() {
+                created_tables.insert(table.clone());
+            }
         }
     }
 
-    for entry in &entries_to_replay {
+    let mut count = 0;
+    for entry in &all_entries {
         match entry {
-            WalEntry::CreateTable { .. } => {}
+            WalEntry::CreateTable { .. } | WalEntry::Checkpoint => {}
             WalEntry::Insert { table, values } => {
-                db.insert(table.clone(), values.clone()).ok();
+                if created_tables.contains(table.as_str()) {
+                    db.insert(table.clone(), values.clone()).ok();
+                    count += 1;
+                }
             }
             WalEntry::Delete { table, condition } => {
-                db.delete(table.clone(), condition.clone()).ok();
+                if created_tables.contains(table.as_str()) {
+                    db.delete(table.clone(), condition.clone()).ok();
+                    count += 1;
+                }
             }
             WalEntry::Update {
                 table,
@@ -53,26 +53,32 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
                 value,
                 condition,
             } => {
-                db.update(
-                    table.clone(),
-                    column.clone(),
-                    value.clone(),
-                    condition.clone(),
-                )
-                .ok();
+                if created_tables.contains(table.as_str()) {
+                    db.update(
+                        table.clone(),
+                        column.clone(),
+                        value.clone(),
+                        condition.clone(),
+                    )
+                    .ok();
+                    count += 1;
+                }
             }
             WalEntry::CreateIndex {
                 index_name,
                 table,
                 column,
             } => {
-                db.create_index(table.clone(), index_name.clone(), column.clone())
-                    .ok();
+                if created_tables.contains(table.as_str()) {
+                    db.create_index(table.clone(), index_name.clone(), column.clone())
+                        .ok();
+                    count += 1;
+                }
             }
             WalEntry::DropIndex { index_name } => {
                 db.drop_index(index_name.clone()).ok();
+                count += 1;
             }
-            WalEntry::Checkpoint => {}
         }
     }
 
