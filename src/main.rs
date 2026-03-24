@@ -6,9 +6,13 @@ use database_engine::storage::Database;
 use database_engine::wal::WalEntry;
 use database_engine::{parser, wal_path as engine_wal_path};
 use std::env;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::time::Instant;
+
+const VERSION: &str = "0.4.1";
 
 pub fn wal_path(db_path: &str) -> String {
     engine_wal_path(db_path)
@@ -77,7 +81,6 @@ pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
             }
         }
     }
-
     Ok(count)
 }
 
@@ -102,6 +105,69 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+fn print_version() {
+    println!("{}", format!("rustdb {}", VERSION).bold().yellow());
+    println!(
+        "{}",
+        "A B-Tree backed SQL database engine built in Rust".cyan()
+    );
+}
+
+fn print_help() {
+    println!(
+        "{}",
+        "rustdb — A B-Tree backed SQL database engine".cyan().bold()
+    );
+    println!();
+    println!("{}", "USAGE:".yellow().bold());
+    println!(
+        "  {}                        Open database in interactive REPL",
+        "rustdb <database>".white()
+    );
+    println!(
+        "  {}         Start TCP server (default port: 7878)",
+        "rustdb <database> --server [PORT]".white()
+    );
+    println!(
+        "  {}              Run a single query and exit",
+        "rustdb <database> --query <SQL>".white()
+    );
+    println!(
+        "  {}               Import SQL file and exit",
+        "rustdb <database> --import <file>".white()
+    );
+    println!(
+        "  {}                    Connect to running server",
+        "rustdb connect [HOST] [PORT]".white()
+    );
+    println!(
+        "  {}                          Show version",
+        "rustdb --version".white()
+    );
+    println!(
+        "  {}                           Show this help",
+        "rustdb --help".white()
+    );
+    println!();
+    println!("{}", "EXAMPLES:".yellow().bold());
+    println!("  {}", "rustdb mydb.json".dimmed());
+    println!("  {}", "rustdb mydb.json --server 7878".dimmed());
+    println!(
+        "  {}",
+        "rustdb mydb.json --query \"SELECT * FROM users\"".dimmed()
+    );
+    println!("  {}", "rustdb mydb.json --import data.sql".dimmed());
+    println!("  {}", "rustdb connect localhost 7878".dimmed());
+    println!();
+    println!("{}", "REPL COMMANDS:".yellow().bold());
+    println!("  {}", ".tables        List all tables".dimmed());
+    println!("  {}", ".schema <t>    Show table schema".dimmed());
+    println!("  {}", ".stats         Database statistics".dimmed());
+    println!("  {}", ".bench N       Benchmark N inserts".dimmed());
+    println!("  {}", ".help          Show help".dimmed());
+    println!("  {}", ".exit          Save and quit".dimmed());
 }
 
 fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: usize) {
@@ -158,7 +224,7 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
         "{}",
         format!(
             "║  {}  •  {}  •  {}                ║",
-            "v0.4.0".bold().yellow(),
+            format!("v{}", VERSION).bold().yellow(),
             "by Sujal".bold().white(),
             "built in Rust".dimmed()
         )
@@ -217,100 +283,194 @@ fn print_banner(db_path: &str, table_count: usize, is_new: bool, wal_recovered: 
     println!();
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let mut db_path = "rustdb.json".to_string();
-    let mut server_port: Option<u16> = None;
-
-    if args.len() == 1 {
-        println!("{}", "Usage: rustdb <database.json>".white());
-        println!("{}", "Example: rustdb mydb.json".dimmed());
-        println!();
-        println!("{}", "REPL Commands:".cyan().bold());
-        println!(
-            "  {}  {}",
-            ".tables".bold().white(),
-            "list all tables".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            ".schema <table>".bold().white(),
-            "show table schema".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            ".stats".bold().white(),
-            "database statistics".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            ".clear".bold().white(),
-            "clear the screen".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            ".bench N".bold().white(),
-            "benchmark N inserts".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            ".help".bold().white(),
-            "show this message".dimmed()
-        );
-        println!("  {}  {}", ".exit".bold().white(), "save and quit".dimmed());
-        println!();
-        println!("{}", "SQL Commands:".cyan().bold());
-        println!(
-            "  {}  {}",
-            "SELECT, INSERT, UPDATE, DELETE".bold().white(),
-            "CRUD operations".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            "CREATE TABLE, CREATE INDEX".bold().white(),
-            "schema management".dimmed()
-        );
-        println!(
-            "  {}  {}",
-            "DROP INDEX, EXPLAIN".bold().white(),
-            "index and query plans".dimmed()
-        );
-        return;
+fn run_client(host: &str, port: u16) {
+    let addr = format!("{}:{}", host, port);
+    let mut stream = match TcpStream::connect(&addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!("✗ Could not connect to {} — {}", addr, e).red()
+            );
+            eprintln!("{}", "  Is the server running?".dimmed());
+            std::process::exit(1);
+        }
+    };
+    println!("{}", format!("Connected to {}", addr).cyan().bold());
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut welcome_line = String::new();
+    if reader.read_line(&mut welcome_line).is_ok() {
+        print!("{}", welcome_line);
     }
-
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--server" {
-            if let Some(port_str) = args.get(i + 1) {
-                match port_str.parse::<u16>() {
-                    Ok(port) => {
-                        server_port = Some(port);
-                        i += 2;
-                    }
-                    Err(_) => {
-                        eprintln!("{}", format!("✗ Invalid port: {}", port_str).red());
-                        return;
+    loop {
+        print!("{}{} ", "db".bold().green(), ">".bold().cyan());
+        io::stdout().flush().expect("Failed to flush stdout");
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(0) => {
+                stream.write_all(b".exit\n").ok();
+                println!("{}", "Disconnected.".yellow());
+                break;
+            }
+            Ok(_) => {
+                let input = input.trim();
+                if input.is_empty() {
+                    continue;
+                }
+                if input == ".exit" {
+                    stream.write_all(b".exit\n").ok();
+                    println!("{}", "Disconnected.".yellow());
+                    break;
+                }
+                if input == ".quit" {
+                    stream.write_all(b".quit\n").ok();
+                    println!("{}", "Server shutting down.".yellow());
+                    break;
+                }
+                let start = Instant::now();
+                let msg = format!("{}\n", input);
+                if stream.write_all(msg.as_bytes()).is_err() {
+                    eprintln!("{}", "✗ Connection lost".red());
+                    break;
+                }
+                let mut response = String::new();
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            eprintln!("{}", "✗ Server closed connection".red());
+                            std::process::exit(1);
+                        }
+                        Ok(_) => {
+                            if line.trim() == "--END--" {
+                                break;
+                            }
+                            response.push_str(&line);
+                        }
+                        Err(e) => {
+                            eprintln!("{}", format!("✗ Read error: {}", e).red());
+                            std::process::exit(1);
+                        }
                     }
                 }
-            } else {
-                eprintln!("{}", "✗ --server requires a port number".red());
-                return;
+                let elapsed = start.elapsed();
+                let ms = elapsed.as_secs_f64() * 1000.0;
+                let response = response.trim_end();
+                if response.starts_with("✗") {
+                    println!("{}", response.red());
+                } else {
+                    println!("{}", response);
+                }
+                println!("{}", format!("  ({:.1}ms round trip)", ms).dimmed());
             }
-        } else {
-            db_path = args[i].clone();
-            i += 1;
+            Err(_) => break,
         }
     }
+}
 
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        print_help();
+        return;
+    }
+    match args[1].as_str() {
+        "--version" | "-V" => {
+            print_version();
+            return;
+        }
+        "--help" | "-h" => {
+            print_help();
+            return;
+        }
+        "connect" => {
+            let host = args.get(2).map(|s| s.as_str()).unwrap_or("localhost");
+            let port = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7878);
+            run_client(host, port);
+            return;
+        }
+        _ => {}
+    }
+    let mut db_path = String::new();
+    let mut server_port: Option<u16> = None;
+    let mut query: Option<String> = None;
+    let mut import_file: Option<String> = None;
+    let mut i = 1;
+    let mut unknown_arg: Option<String> = None;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.as_str() {
+            "--server" | "-s" => {
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with("-") {
+                        match next.parse::<u16>() {
+                            Ok(port) => {
+                                server_port = Some(port);
+                                i += 2;
+                            }
+                            Err(_) => {
+                                unknown_arg = Some(next.clone());
+                                break;
+                            }
+                        }
+                    } else {
+                        server_port = Some(7878);
+                        i += 1;
+                    }
+                } else {
+                    server_port = Some(7878);
+                    i += 1;
+                }
+            }
+            "--query" | "-q" => {
+                if let Some(sql) = args.get(i + 1) {
+                    query = Some(sql.clone());
+                    i += 2;
+                } else {
+                    eprintln!("{}", "✗ --query requires a SQL argument".red());
+                    std::process::exit(1);
+                }
+            }
+            "--import" | "-i" => {
+                if let Some(file) = args.get(i + 1) {
+                    import_file = Some(file.clone());
+                    i += 2;
+                } else {
+                    eprintln!("{}", "✗ --import requires a file argument".red());
+                    std::process::exit(1);
+                }
+            }
+            _ if arg.starts_with("-") => {
+                unknown_arg = Some(arg.clone());
+                break;
+            }
+            _ => {
+                if db_path.is_empty() {
+                    db_path = arg.clone();
+                    i += 1;
+                } else {
+                    unknown_arg = Some(arg.clone());
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(unknown) = unknown_arg {
+        eprintln!("{}", format!("✗ Unknown argument: {}", unknown).red());
+        eprintln!("{}", "  Run 'rustdb --help' for usage".dimmed());
+        std::process::exit(1);
+    }
+    if db_path.is_empty() {
+        print_help();
+        return;
+    }
     if let Some(port) = server_port {
         database_engine::server::start(db_path, port);
         return;
     }
-
     let wal_path = wal_path(&db_path);
     let file_exists = Path::new(&db_path).exists();
     let wal_exists = Path::new(&wal_path).exists();
-
     let mut db = match Database::load(&db_path) {
         Ok(loaded_db) => {
             if file_exists {
@@ -319,9 +479,11 @@ fn main() {
                 Database::new()
             }
         }
-        Err(_) => Database::new(),
+        Err(e) => {
+            eprintln!("{}", format!("✗ Failed to load database: {}", e).red());
+            std::process::exit(1);
+        }
     };
-
     let mut wal_recovered = 0;
     if wal_exists {
         match replay_wal(&mut db, &wal_path) {
@@ -356,7 +518,242 @@ fn main() {
             }
         }
     }
-
+    if let Some(ref sql) = query {
+        let tokens = lexer::tokenize(sql);
+        match parser::parse(tokens) {
+            Ok(stmt) => {
+                let is_mutation = matches!(
+                    stmt,
+                    Statement::CreateTable { .. }
+                        | Statement::Insert { .. }
+                        | Statement::Delete { .. }
+                        | Statement::Update { .. }
+                        | Statement::CreateIndex { .. }
+                        | Statement::DropIndex { .. }
+                );
+                if is_mutation {
+                    let wal_entry = match &stmt {
+                        Statement::CreateTable { table, columns } => WalEntry::CreateTable {
+                            table: table.clone(),
+                            columns: columns.clone(),
+                        },
+                        Statement::Insert { table, values } => WalEntry::Insert {
+                            table: table.clone(),
+                            values: values.clone(),
+                        },
+                        Statement::Delete { table, condition } => WalEntry::Delete {
+                            table: table.clone(),
+                            condition: condition.clone(),
+                        },
+                        Statement::Update {
+                            table,
+                            column,
+                            value,
+                            condition,
+                        } => WalEntry::Update {
+                            table: table.clone(),
+                            column: column.clone(),
+                            value: value.clone(),
+                            condition: condition.clone(),
+                        },
+                        Statement::CreateIndex {
+                            index_name,
+                            table,
+                            column,
+                        } => WalEntry::CreateIndex {
+                            index_name: index_name.clone(),
+                            table: table.clone(),
+                            column: column.clone(),
+                        },
+                        Statement::DropIndex { index_name } => WalEntry::DropIndex {
+                            index_name: index_name.clone(),
+                        },
+                        _ => {
+                            eprintln!("{}", "✗ Unsupported statement type".red());
+                            std::process::exit(1);
+                        }
+                    };
+                    if let Err(e) = database_engine::wal::append(&wal_path, &wal_entry) {
+                        eprintln!(
+                            "{} {}",
+                            "⚠".yellow().bold(),
+                            format!("WAL append failed: {}", e).yellow()
+                        );
+                    }
+                }
+                match execute(&mut db, stmt) {
+                    Ok(result) => {
+                        println!("{}", result);
+                        if is_mutation {
+                            if let Err(e) = db.save(&db_path) {
+                                eprintln!(
+                                    "{} {}",
+                                    "✗".red().bold(),
+                                    format!("Error saving: {}", e).red()
+                                );
+                                std::process::exit(1);
+                            }
+                            if let Err(e) =
+                                database_engine::wal::append(&wal_path, &WalEntry::Checkpoint)
+                            {
+                                eprintln!(
+                                    "{} {}",
+                                    "⚠".yellow().bold(),
+                                    format!("WAL checkpoint failed: {}", e).yellow()
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{} {}", "✗".red().bold(), e.red());
+                        std::process::exit(1);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} {}",
+                    "✗".red().bold(),
+                    format!("Parse error: {}", e).red()
+                );
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(ref file) = import_file {
+        println!("{}", "Importing...".cyan().bold());
+        let file = match File::open(file) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("{}", format!("✗ Cannot open file: {}", e).red());
+                std::process::exit(1);
+            }
+        };
+        let reader = BufReader::new(file);
+        let mut statements = 0usize;
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+        let start = Instant::now();
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+            statements += 1;
+            let tokens = lexer::tokenize(trimmed);
+            match parser::parse(tokens) {
+                Ok(stmt) => {
+                    let is_mutation = matches!(
+                        stmt,
+                        Statement::CreateTable { .. }
+                            | Statement::Insert { .. }
+                            | Statement::Delete { .. }
+                            | Statement::Update { .. }
+                            | Statement::CreateIndex { .. }
+                            | Statement::DropIndex { .. }
+                    );
+                    if is_mutation {
+                        let wal_entry = match &stmt {
+                            Statement::CreateTable { table, columns } => WalEntry::CreateTable {
+                                table: table.clone(),
+                                columns: columns.clone(),
+                            },
+                            Statement::Insert { table, values } => WalEntry::Insert {
+                                table: table.clone(),
+                                values: values.clone(),
+                            },
+                            Statement::Delete { table, condition } => WalEntry::Delete {
+                                table: table.clone(),
+                                condition: condition.clone(),
+                            },
+                            Statement::Update {
+                                table,
+                                column,
+                                value,
+                                condition,
+                            } => WalEntry::Update {
+                                table: table.clone(),
+                                column: column.clone(),
+                                value: value.clone(),
+                                condition: condition.clone(),
+                            },
+                            Statement::CreateIndex {
+                                index_name,
+                                table,
+                                column,
+                            } => WalEntry::CreateIndex {
+                                index_name: index_name.clone(),
+                                table: table.clone(),
+                                column: column.clone(),
+                            },
+                            Statement::DropIndex { index_name } => WalEntry::DropIndex {
+                                index_name: index_name.clone(),
+                            },
+                            _ => continue,
+                        };
+                        if let Err(e) = database_engine::wal::append(&wal_path, &wal_entry) {
+                            eprintln!(
+                                "{} {}",
+                                "⚠".yellow().bold(),
+                                format!("WAL append failed: {}", e).yellow()
+                            );
+                        }
+                    }
+                    match execute(&mut db, stmt) {
+                        Ok(_) => {
+                            succeeded += 1;
+                            if is_mutation && statements % 1000 == 0 {
+                                print!(
+                                    "\rImporting... {} statements processed",
+                                    format_number(statements)
+                                );
+                                io::stdout().flush().ok();
+                            }
+                        }
+                        Err(_) => {
+                            failed += 1;
+                        }
+                    }
+                }
+                Err(_) => {
+                    failed += 1;
+                }
+            }
+        }
+        print!("\r{}", " ".repeat(60));
+        print!("\r");
+        let elapsed = start.elapsed();
+        println!("{}", "✓ Import complete".bold().green());
+        println!("  {}: {}", "statements".dimmed(), format_number(statements));
+        println!(
+            "  {}: {}",
+            "succeeded".dimmed(),
+            format_number(succeeded).green()
+        );
+        println!("  {}: {}", "failed".dimmed(), format_number(failed).red());
+        println!("  {}: {:.1}s", "time".dimmed(), elapsed.as_secs_f64());
+        if let Err(e) = db.save(&db_path) {
+            eprintln!(
+                "{} {}",
+                "✗".red().bold(),
+                format!("Error saving: {}", e).red()
+            );
+            std::process::exit(1);
+        }
+        if let Err(e) = database_engine::wal::append(&wal_path, &WalEntry::Checkpoint) {
+            eprintln!(
+                "{} {}",
+                "⚠".yellow().bold(),
+                format!("WAL checkpoint failed: {}", e).yellow()
+            );
+        }
+        return;
+    }
     let table_count = db.table_count();
     print_banner(
         &db_path,
@@ -364,11 +761,9 @@ fn main() {
         !file_exists && wal_recovered == 0,
         wal_recovered,
     );
-
     loop {
         print!("{}{} ", "db".bold().green(), ">".bold().cyan());
         io::stdout().flush().expect("Failed to flush stdout");
-
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(0) => {
@@ -410,7 +805,6 @@ fn main() {
                     }
                     break;
                 }
-
                 if input.starts_with(".bench") {
                     let n: usize = input
                         .trim_start_matches(".bench")
@@ -420,7 +814,6 @@ fn main() {
                     run_benchmark(&mut db, n);
                     continue;
                 }
-
                 if input == ".tables" {
                     let tables = db.table_names();
                     if tables.is_empty() {
@@ -443,7 +836,6 @@ fn main() {
                     }
                     continue;
                 }
-
                 if input.starts_with(".schema") {
                     let table_name = input.trim_start_matches(".schema").trim();
                     if table_name.is_empty() {
@@ -509,7 +901,6 @@ fn main() {
                     }
                     continue;
                 }
-
                 if input == ".stats" {
                     let tables = db.table_count();
                     let total_rows: usize = db
@@ -535,7 +926,6 @@ fn main() {
                         .map(|t| t.rows.depth())
                         .max()
                         .unwrap_or(0);
-
                     println!("{}", "┌─────────────────────────────────┐".cyan());
                     println!("{}", "│  Database Statistics            │".cyan().bold());
                     println!("{}", "├─────────────────────────────────┤".cyan());
@@ -578,13 +968,11 @@ fn main() {
                     println!("{}", "└─────────────────────────────────┘".cyan());
                     continue;
                 }
-
                 if input == ".clear" {
                     print!("\x1B[2J\x1B[H");
                     io::stdout().flush().ok();
                     continue;
                 }
-
                 if input == ".help" {
                     println!(
                         "{}",
@@ -607,34 +995,13 @@ fn main() {
                             .bold()
                             .yellow()
                     );
-                    println!(
-                        "{}",
-                        "│  .tables          list all tables           │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .schema <table>  show table schema         │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .stats           database statistics       │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .clear           clear the screen          │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .bench N         benchmark N inserts       │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .help            show this message         │".cyan()
-                    );
-                    println!(
-                        "{}",
-                        "│  .exit            save and quit             │".cyan()
-                    );
+                    println!("{}          list all tables", "│  .tables".cyan());
+                    println!("{}  show table schema", "│  .schema <table>".cyan());
+                    println!("{}         database statistics", "│  .stats".cyan());
+                    println!("{}          clear the screen", "│  .clear".cyan());
+                    println!("{}          benchmark N inserts", "│  .bench N".cyan());
+                    println!("{}            show this message", "│  .help".cyan());
+                    println!("{}            save and quit", "│  .exit".cyan());
                     println!(
                         "{}",
                         "├─────────────────────────────────────────────┤".cyan()
@@ -696,7 +1063,6 @@ fn main() {
                     );
                     continue;
                 }
-
                 let start = Instant::now();
                 let tokens = lexer::tokenize(input);
                 match parser::parse(tokens) {
@@ -710,7 +1076,6 @@ fn main() {
                                 | Statement::CreateIndex { .. }
                                 | Statement::DropIndex { .. }
                         );
-
                         if is_mutation {
                             let wal_entry = match &stmt {
                                 Statement::CreateTable { table, columns } => {
@@ -752,7 +1117,6 @@ fn main() {
                                 },
                                 _ => continue,
                             };
-
                             if let Err(e) = database_engine::wal::append(&wal_path, &wal_entry) {
                                 println!(
                                     "{} {}",
@@ -761,7 +1125,6 @@ fn main() {
                                 );
                             }
                         }
-
                         match execute(&mut db, stmt) {
                             Ok(result) => {
                                 let elapsed = start.elapsed();
@@ -841,10 +1204,9 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
             limit,
         } => {
             let table_name = table.clone();
-            let (rows, _index_used) = db.select(table, columns, condition, order_by, limit)?;
+            let (rows, _) = db.select(table, columns, condition, order_by, limit)?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
-            let base_output = format_table(&table_meta.columns, &rows);
-            Ok(base_output)
+            Ok(format_table(&table_meta.columns, &rows))
         }
         Statement::CreateIndex {
             index_name,
@@ -929,41 +1291,33 @@ fn format_explain(plan: &planner::QueryPlan) -> String {
         "{}\n",
         "├─────────────────────────────────────────┤".cyan()
     ));
-
     let op_value = match &plan.scan_type {
         planner::ScanType::FullScan => "FULL_SCAN".yellow().to_string(),
         planner::ScanType::IndexScan { index_name, .. } => {
             format!("{} ({})", "INDEX_SCAN".bold().green(), index_name.cyan())
         }
-        planner::ScanType::IndexRangeScan { index_name, .. } => {
-            format!(
-                "{} ({})",
-                "INDEX_RANGE_SCAN".bold().green(),
-                index_name.cyan()
-            )
-        }
+        planner::ScanType::IndexRangeScan { index_name, .. } => format!(
+            "{} ({})",
+            "INDEX_RANGE_SCAN".bold().green(),
+            index_name.cyan()
+        ),
     };
     output.push_str(&format!("│  operation  →  {}\n", op_value));
     output.push_str(&format!("│  table      →  {}\n", plan.table.white()));
-
     if let Some(condition) = &plan.condition {
         output.push_str(&format!("│  condition  →  {}\n", condition.white()));
     }
-
     if let Some(order_by) = &plan.order_by {
         output.push_str(&format!("│  order by   →  {}\n", order_by.white()));
     }
-
     if let Some(limit) = &plan.limit {
         output.push_str(&format!("│  limit      →  {}\n", limit.to_string().green()));
     }
-
     output.push_str(&format!(
         "│  est. rows  →  ~{} of {}\n",
         format_number(plan.estimated_rows).green(),
         format_number(plan.total_rows).green()
     ));
-
     output.push_str(&format!(
         "{}",
         "└─────────────────────────────────────────┘".cyan()
@@ -973,9 +1327,7 @@ fn format_explain(plan: &planner::QueryPlan) -> String {
 
 fn run_benchmark(db: &mut Database, n: usize) {
     use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
-
     let insert_start = Instant::now();
-
     db.create_table(
         "_bench".to_string(),
         vec![
@@ -994,7 +1346,6 @@ fn run_benchmark(db: &mut Database, n: usize) {
         ],
     )
     .ok();
-
     for i in 0..n {
         let _ = db.insert(
             "_bench".to_string(),
@@ -1006,7 +1357,6 @@ fn run_benchmark(db: &mut Database, n: usize) {
         );
     }
     let insert_time = insert_start.elapsed();
-
     let select_full_start = Instant::now();
     let _ = db.select(
         "_bench".to_string(),
@@ -1020,7 +1370,6 @@ fn run_benchmark(db: &mut Database, n: usize) {
         None,
     );
     let select_full_time = select_full_start.elapsed();
-
     let select_id_start = Instant::now();
     let _ = db.select(
         "_bench".to_string(),
@@ -1034,7 +1383,6 @@ fn run_benchmark(db: &mut Database, n: usize) {
         None,
     );
     let select_id_time = select_id_start.elapsed();
-
     let index_start = Instant::now();
     let _ = db.create_index(
         "_bench".to_string(),
@@ -1042,7 +1390,6 @@ fn run_benchmark(db: &mut Database, n: usize) {
         "value".to_string(),
     );
     let index_time = index_start.elapsed();
-
     let select_index_start = Instant::now();
     let _ = db.select(
         "_bench".to_string(),
@@ -1056,52 +1403,16 @@ fn run_benchmark(db: &mut Database, n: usize) {
         None,
     );
     let select_index_time = select_index_start.elapsed();
-
     let delete_start = Instant::now();
     let _ = db.delete("_bench".to_string(), None);
     let delete_time = delete_start.elapsed();
-
     let _ = db.drop_index("idx_value".to_string());
-
     let table = db.get_table("_bench");
     let btree_depth = table.map(|t| t.rows.depth()).unwrap_or(0);
-
     let rows_per_sec = (n as f64 / insert_time.as_secs_f64()) as usize;
-
     println!();
-    println!(
-        "{}",
-        format!(
-            "╔══════════════════════════════════════════╗\n\
-             ║         {}  ║\n\
-             ╠══════════════════════════════════════════╣\n\
-             ║  INSERT {} rows    →   {:>7.1}ms      ║\n\
-             ║  SELECT full scan   →   {:>7.1}ms      ║\n\
-             ║  SELECT by id       →   {:>7.1}ms      ║\n\
-             ║  CREATE INDEX      →   {:>7.1}ms      ║\n\
-             ║  SELECT with index →   {:>7.1}ms      ║\n\
-             ║  DELETE all rows   →   {:>7.1}ms      ║\n\
-             ╠══════════════════════════════════════════╣\n\
-             ║  B-Tree depth       →   {:>7}            ║\n\
-             ║  Rows/sec (insert)  →   {:>7},{}       ║\n\
-             ╚══════════════════════════════════════════╝",
-            format!("rustdb benchmark — {} rows", n),
-            n,
-            insert_time.as_secs_f64() * 1000.0,
-            select_full_time.as_secs_f64() * 1000.0,
-            select_id_time.as_secs_f64() * 1000.0,
-            index_time.as_secs_f64() * 1000.0,
-            select_index_time.as_secs_f64() * 1000.0,
-            delete_time.as_secs_f64() * 1000.0,
-            btree_depth,
-            (rows_per_sec / 1000).to_string().yellow(),
-            (rows_per_sec % 1000).to_string().yellow()
-        )
-        .cyan()
-        .bold()
-    );
+    println!("{}", format!("╔══════════════════════════════════════════╗\n ║         {}  ║\n ╠══════════════════════════════════════════╣\n ║  INSERT {} rows    →   {:>7.1}ms      ║\n ║  SELECT full scan   →   {:>7.1}ms      ║\n ║  SELECT by id       →   {:>7.1}ms      ║\n ║  CREATE INDEX      →   {:>7.1}ms      ║\n ║  SELECT with index →   {:>7.1}ms      ║\n ║  DELETE all rows   →   {:>7.1}ms      ║\n ╠══════════════════════════════════════════╣\n ║  B-Tree depth       →   {:>7}            ║\n ║  Rows/sec (insert)  →   {:>7},{}       ║\n ╚══════════════════════════════════════════╝", format!("rustdb benchmark — {} rows", n), n, insert_time.as_secs_f64() * 1000.0, select_full_time.as_secs_f64() * 1000.0, select_id_time.as_secs_f64() * 1000.0, index_time.as_secs_f64() * 1000.0, select_index_time.as_secs_f64() * 1000.0, delete_time.as_secs_f64() * 1000.0, btree_depth, (rows_per_sec / 1000).to_string().yellow(), (rows_per_sec % 1000).to_string().yellow()).cyan().bold());
     println!();
-
     let _ = db.drop_table("_bench".to_string());
 }
 
@@ -1109,7 +1420,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
     if rows.is_empty() {
         return "(empty table)".dimmed().italic().to_string();
     }
-
     let select_all = rows[0].len() == columns.len();
     let headers: Vec<String> = if select_all {
         columns.iter().map(|c| c.name.clone()).collect()
@@ -1124,7 +1434,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         }
         h
     };
-
     let widths: Vec<usize> = headers
         .iter()
         .enumerate()
@@ -1138,9 +1447,7 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
             w
         })
         .collect();
-
     let mut output = String::new();
-
     output.push_str(&"┌".cyan().to_string());
     for (i, w) in widths.iter().enumerate() {
         if i > 0 {
@@ -1149,7 +1456,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         output.push_str(&"─".repeat(*w + 2));
     }
     output.push_str(&"┐\n".cyan().to_string());
-
     output.push_str(&"│".cyan().to_string());
     for (i, h) in headers.iter().enumerate() {
         output.push_str(&" ".to_string());
@@ -1161,7 +1467,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         ));
     }
     output.push_str("\n");
-
     output.push_str(&"├".cyan().to_string());
     for (i, w) in widths.iter().enumerate() {
         if i > 0 {
@@ -1170,7 +1475,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         output.push_str(&"─".repeat(*w + 2));
     }
     output.push_str(&"┤\n".cyan().to_string());
-
     for row in rows {
         output.push_str(&"│".cyan().to_string());
         for (i, val) in row.iter().enumerate() {
@@ -1182,7 +1486,6 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         }
         output.push_str("\n");
     }
-
     output.push_str(&"└".cyan().to_string());
     for (i, w) in widths.iter().enumerate() {
         if i > 0 {
@@ -1191,20 +1494,16 @@ fn format_table(columns: &[parser::ColumnDef], rows: &[Vec<parser::Value>]) -> S
         output.push_str(&"─".repeat(*w + 2));
     }
     output.push_str(&"┘".cyan().to_string());
-
     output
 }
 
 fn value_to_string(v: &parser::Value) -> String {
     match v {
         parser::Value::Integer(n) => n.to_string(),
-        parser::Value::Float(f) => {
-            let formatted = format!("{:.4}", f);
-            formatted
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_string()
-        }
+        parser::Value::Float(f) => format!("{:.4}", f)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string(),
         parser::Value::Boolean(b) => b.to_string(),
         parser::Value::Text(s) => s.clone(),
     }

@@ -13,6 +13,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.4.1] - 2026-03-24
 
+### Added
+
+#### CLI Tool Improvements
+- **--version / -V flag**: Print version and exit with `rustdb --version`
+- **--help / -h flag**: Print full usage guide and exit with `rustdb --help`
+- **--query / -q flag**: Run single SQL query and exit (one-shot mode)
+  - `rustdb mydb.json --query "SELECT * FROM users"`
+  - `rustdb mydb.json -q "SELECT * FROM users WHERE age > 18"`
+  - Great for scripting: `rustdb mydb.json -q "SELECT * FROM users" > output.txt`
+- **--import / -i flag**: Import SQL file line-by-line
+  - Skips empty lines and `--` SQL comments
+  - Shows progress with in-place `\r` updates
+  - Summary shows statements/succeeded/failed/time
+  - `rustdb mydb.json --import data.sql`
+- **connect subcommand**: Connect to running server
+  - `rustdb connect` → localhost:7878
+  - `rustdb connect localhost 9000`
+  - `rustdb connect 192.168.1.5 9000`
+- **--server / -s flag**: Start TCP server (default port 7878)
+  - `rustdb mydb.json --server` → port 7878
+  - `rustdb mydb.json --server 9000` → port 9000
+  - `rustdb mydb.json -s` → port 7878
+- **Argument parsing**: Pure stdlib, no external crates
+- **Unknown argument detection**: Friendly error message with hint to use --help
+
 ### Fixed
 - WAL recovery now uses two-pass replay — CreateTable entries are always
   replayed before Insert/Update/Delete entries, fixing "Table not found"
