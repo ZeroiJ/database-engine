@@ -1,8 +1,0 @@
-{"CreateTable":{"table":"users","columns":[{"name":"id","data_type":"Int"},{"name":"name","data_type":"Text"},{"name":"age","data_type":"Int"}]}}
-"Checkpoint"
-{"Insert":{"table":"users","values":[{"Integer":1},{"Text":"alice"},{"Integer":30}]}}
-"Checkpoint"
-{"Insert":{"table":"users","values":[{"Integer":2},{"Text":"bob"},{"Integer":25}]}}
-"Checkpoint"
-{"Insert":{"table":"users","values":[{"Integer":3},{"Text":"charlie"},{"Integer":35}]}}
-"Checkpoint"

@@ -1,6 +1,0 @@
-{"CreateTable":{"table":"t","columns":[{"name":"id","data_type":"Int"}]}}
-"Checkpoint"
-{"Insert":{"table":"t","values":[{"Integer":1}]}}
-"Checkpoint"
-{"Insert":{"table":"t","values":[{"Integer":2}]}}
-"Checkpoint"
