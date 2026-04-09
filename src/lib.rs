@@ -1,4 +1,6 @@
 pub mod btree;
+pub mod buffer;
+pub mod disk;
 pub mod lexer;
 pub mod parser;
 pub mod planner;
@@ -6,6 +8,8 @@ pub mod server;
 pub mod storage;
 pub mod wal;
 
+pub use buffer::BufferPoolManager;
+pub use disk::{Page, PageId, PAGE_SIZE};
 pub use parser::{ColumnDef, Condition, DataType, Operator, Statement, Value, WhereClause};
 pub use storage::Database;
 pub use wal::WalEntry;
