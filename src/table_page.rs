@@ -8,6 +8,7 @@ pub struct TablePage {
     pub page_id: PageId,
     pub rows: BTreeMap<u16, Row>,
     pub next_slot_id: u16,
+    pub next_page_id: Option<PageId>,
 }
 
 impl TablePage {
@@ -16,6 +17,7 @@ impl TablePage {
             page_id,
             rows: BTreeMap::new(),
             next_slot_id: 0,
+            next_page_id: None,
         }
     }
 

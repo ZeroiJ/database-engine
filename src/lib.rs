@@ -7,11 +7,12 @@ pub mod parser;
 pub mod planner;
 pub mod server;
 pub mod storage;
+pub mod table_heap;
 pub mod table_page;
 pub mod wal;
 
 pub use buffer::BufferPoolManager;
-pub use disk::{Page, PageId, PAGE_SIZE, RecordId};
+pub use disk::{Page, PageId, RecordId, PAGE_SIZE};
 pub use disk_btree::DiskBTree;
 pub use parser::{ColumnDef, Condition, DataType, Operator, Statement, Value, WhereClause};
 pub use storage::Database;

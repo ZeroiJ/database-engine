@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Page-Based Storage Architecture (Phase 1, 2 & 3)
+#### Page-Based Storage Architecture (Phase 1, 2, 3 & 4)
 - **disk.rs**: DiskManager for raw 4KB page I/O
   - `PAGE_SIZE = 4096` bytes
   - `PageId = u32` type
@@ -29,8 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DiskBTree` wrapper for buffer pool operations
 - **table_page.rs**: Dedicated row storage pages
   - `TablePage` struct: stores rows in BTreeMap<slot_id, Row>
+  - `next_page_id` for linked list of pages
   - `insert_row()` with size check to prevent 4KB overflow
   - `get_row()` / `delete_row()` methods
+- **table_heap.rs**: Table heap manager
+  - `TableHeap` struct: manages linked list of TablePages
+  - `new()` allocates first page
+  - `insert_row()` auto-allocates new page when full
+  - `get_row()` O(1) retrieval via RecordId
 - Unit tests for all new modules
 
 ---
