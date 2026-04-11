@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Page-Based Storage Architecture (Phase 1-5)
+#### Page-Based Storage Architecture (Phase 1-6)
 - **disk.rs**: DiskManager for raw 4KB page I/O
   - `PAGE_SIZE = 4096` bytes
   - `PageId = u32` type
@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `insert_row()` auto-allocates new page when full
   - `get_row()` O(1) retrieval via RecordId
 - Unit tests for all new modules
+
+#### Phase 6: B-Tree Node Splitting
+- **MAX_KEYS = 100**: Prevent 4KB page overflow
+- **insert() refactored**: Proactive splitting when root is full
+- **insert_non_full()**: Recursive insertion into non-full nodes
+- **split_child()**: Split full child node, promote median key to parent
+- **test_disk_btree_node_splitting**: Stress test with 300 keys - all pass
 
 ---
 
