@@ -4,154 +4,116 @@ iteration: 1
 max_iterations: 500
 completion_promise: "DONE"
 initial_completion_promise: "DONE"
-started_at: "2026-04-11T10:44:08.988Z"
+started_at: "2026-04-11T10:52:06.293Z"
 session_id: "ses_28d6ab4a5ffeTCKPJ0Xak4bkWO"
 ultrawork: true
 strategy: "continue"
-message_count_at_start: 129
+message_count_at_start: 161
 ---
 # Role and Context
-Phase 3 (Table Pages and Record IDs) was a massive success! We successfully separated index pointers from actual row data.
+Phase 4 (The Table Heap) was flawlessly executed. We now have a robust storage layer that hands out `RecordId` pointers. 
 
-# Task: Phase 4 - The Table Heap
-A single `TablePage` is limited to 4KB. A real table requires thousands of pages. We need to build a `TableHeap` that manages a linked list of `TablePage`s, automatically allocating new pages from the Buffer Pool when the current one fills up.
+# Task: Phase 5 - Disk-Backed B-Tree Algorithms (Part 1)
+We must now implement the actual database algorithms inside `DiskBTree` (in `src/disk_btree.rs`) so it can search for and insert `RecordId`s. 
 
-## Step 1: Update `TablePage` to Support Linking
-In `src/table_page.rs`, add a `next_page_id` field to the `TablePage` struct so we can form a linked list of pages.
+We are going to implement `search` and a basic `insert` (assuming the root node isn't full yet). 
+
+## Step 1: Implement `DiskBTree::search`
+Add a `search` method to `DiskBTree`. This method takes a key, fetches the root node, and traverses down the tree by fetching child pages until it finds the key or hits a leaf.
 
 ```rust
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TablePage {
-    pub page_id: PageId,
-    pub rows: BTreeMap<u16, Row>, 
-    pub next_slot_id: u16,
-    pub next_page_id: Option<PageId>, // <-- NEW: Pointer to the next page
-}
+impl DiskBTree {
+    // ... keep existing new, get_node, save_node ...
 
-impl TablePage {
-    // Update `new()` to initialize `next_page_id` as `None`
-    pub fn new(page_id: PageId) -> Self {
-        Self {
-            page_id,
-            rows: BTreeMap::new(),
-            next_slot_id: 0,
-            next_page_id: None,
+    /// Searches the B-Tree for a given key and returns its RecordId.
+    pub fn search(&self, key: i64) -> Option<RecordId> {
+        let mut current_page_id = self.root_page_id;
+
+        loop {
+            let node = self.get_node(current_page_id);
+            
+            // Find the first key strictly greater than the target key.
+            // i represents the index of the child pointer we should follow.
+            let mut i = 0;
+            while i < node.keys.len() && key > node.keys[i] {
+                i += 1;
+            }
+
+            // Did we find the exact key?
+            if i < node.keys.len() && key == node.keys[i] {
+                return Some(node.values[i]);
+            }
+
+            // If we are at a leaf and didn't find it, it doesn't exist.
+            if node.is_leaf {
+                return None;
+            }
+
+            // Otherwise, traverse down to the appropriate child page.
+            current_page_id = node.children[i];
         }
     }
-    // ... keep existing methods ...
 }
 
-Step 2: Create src/table_heap.rs
+Step 2: Implement Basic DiskBTree::insert
 
-Create a new file src/table_heap.rs. This structure acts as the manager for a specific table's raw data.
+Add an insert method. For this phase, we will implement insertion assuming the node has enough space (we will handle node splitting in the next phase to keep this PR focused).
 Rust
 
-use crate::buffer::BufferPoolManager;
-use crate::disk::{PageId, RecordId};
-use crate::storage::Row; // Adjust path to Row
-use crate::table_page::TablePage;
-use std::cell::RefCell;
-use std::rc::Rc;
+impl DiskBTree {
+    /// Inserts a key and RecordId into the tree. 
+    /// Note: This version assumes the target leaf node has room (no splitting yet).
+    pub fn insert(&mut self, key: i64, value: RecordId) {
+        let mut current_page_id = self.root_page_id;
 
-pub struct TableHeap {
-    pub buffer_pool: Rc<RefCell<BufferPoolManager>>,
-    pub first_page_id: PageId,
-    pub last_page_id: PageId,
-}
+        loop {
+            let mut node = self.get_node(current_page_id);
 
-impl TableHeap {
-    /// Creates a new TableHeap, allocating the very first page.
-    pub fn new(buffer_pool: Rc<RefCell<BufferPoolManager>>) -> Self {
-        let mut pool = buffer_pool.borrow_mut();
-        
-        // Allocate the first page
-        let page = pool.new_page().expect("Buffer pool out of memory").expect("No page returned");
-        let first_page_id = page.id;
-        
-        // Initialize it as a TablePage
-        let table_page = TablePage::new(first_page_id);
-        page.data = table_page.encode();
-        
-        // Unpin and mark dirty
-        pool.unpin_page(first_page_id, true);
+            if node.is_leaf {
+                // We are at the leaf. Find where to insert to keep keys sorted.
+                let mut insert_idx = 0;
+                while insert_idx < node.keys.len() && key > node.keys[insert_idx] {
+                    insert_idx += 1;
+                }
 
-        Self {
-            buffer_pool: buffer_pool.clone(),
-            first_page_id,
-            last_page_id: first_page_id,
-        }
-    }
+                // If key already exists, update the RecordId
+                if insert_idx < node.keys.len() && key == node.keys[insert_idx] {
+                    node.values[insert_idx] = value;
+                } else {
+                    // Otherwise, insert the new key and value
+                    node.keys.insert(insert_idx, key);
+                    node.values.insert(insert_idx, value);
+                }
 
-    /// Loads an existing TableHeap starting from a known first page.
-    pub fn open(buffer_pool: Rc<RefCell<BufferPoolManager>>, first_page_id: PageId, last_page_id: PageId) -> Self {
-        Self { buffer_pool, first_page_id, last_page_id }
-    }
-
-    /// Inserts a row into the heap. If the last page is full, allocates a new one.
-    pub fn insert_row(&mut self, row: Row) -> Result<RecordId, String> {
-        let mut pool = self.buffer_pool.borrow_mut();
-        
-        // 1. Fetch the last page
-        let page = pool.fetch_page(self.last_page_id).unwrap().unwrap();
-        let mut table_page = TablePage::decode(&page.data);
-
-        // 2. Try to insert the row
-        match table_page.insert_row(row.clone()) {
-            Ok(slot_id) => {
-                // Success! It fit.
-                page.data = table_page.encode();
-                pool.unpin_page(self.last_page_id, true);
-                Ok(RecordId { page_id: self.last_page_id, slot_id })
+                // Save the modified node back to the buffer pool
+                self.save_node(&node);
+                return;
             }
-            Err(_) => {
-                // Page is full. We need a new page.
-                let new_page = pool.new_page().unwrap().unwrap();
-                let new_page_id = new_page.id;
-                let mut new_table_page = TablePage::new(new_page_id);
-                
-                // Insert the row into the new page (assuming a single row always fits < 4KB)
-                let slot_id = new_table_page.insert_row(row).unwrap();
-                new_page.data = new_table_page.encode();
-                
-                // Link the old page to the new page
-                table_page.next_page_id = Some(new_page_id);
-                page.data = table_page.encode();
-                
-                // Update our last_page_id pointer
-                let old_last_page_id = self.last_page_id;
-                self.last_page_id = new_page_id;
-                
-                // Clean up
-                pool.unpin_page(old_last_page_id, true);
-                pool.unpin_page(new_page_id, true);
-                
-                Ok(RecordId { page_id: new_page_id, slot_id })
-            }
-        }
-    }
 
-    /// Retrieves a row directly using its RecordId (O(1) disk read).
-    pub fn get_row(&self, rid: RecordId) -> Option<Row> {
-        let mut pool = self.buffer_pool.borrow_mut();
-        let page = pool.fetch_page(rid.page_id).unwrap().unwrap();
-        let table_page = TablePage::decode(&page.data);
-        let row = table_page.get_row(rid.slot_id).cloned();
-        
-        pool.unpin_page(rid.page_id, false);
-        row
+            // Not a leaf. Find the correct child to traverse down to.
+            let mut i = 0;
+            while i < node.keys.len() && key > node.keys[i] {
+                i += 1;
+            }
+            current_page_id = node.children[i];
+        }
     }
 }
 
-Step 3: Module Registration and Tests
+Step 3: Tests
 
-    Add pub mod table_heap; to src/lib.rs.
+In src/disk_btree.rs, write a test test_disk_btree_search_insert.
 
-    Write a test in src/table_heap.rs that:
+    Create a BufferPoolManager.
 
-        Creates a BufferPoolManager and a TableHeap.
+    Allocate a new page to act as the root_page_id.
 
-        Inserts enough large rows (e.g., 5 rows of 1000 bytes each) to purposefully exceed the 4KB limit of the first page.
+    Initialize an empty DiskBTreeNode (leaf = true) and save it to that root page.
 
-        Asserts that table_heap.first_page_id != table_heap.last_page_id (proving it allocated a new page and linked them).
+    Create a DiskBTree.
 
-        Retrieves all the rows using their returned RecordIds to ensure data integrity.
+    Insert 3 keys (e.g., 10, 20, 5) with dummy RecordIds.
+
+    Search for those 3 keys and assert the correct RecordIds are returned.
+
+    Search for a non-existent key (e.g., 99) and assert it returns None.

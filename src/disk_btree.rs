@@ -69,6 +69,60 @@ impl DiskBTree {
         page.data = node.encode();
         pool.unpin_page(node.page_id, true);
     }
+
+    pub fn search(&self, key: i64) -> Option<RecordId> {
+        let mut current_page_id = self.root_page_id;
+
+        loop {
+            let node = self.get_node(current_page_id);
+
+            let mut i = 0;
+            while i < node.keys.len() && key > node.keys[i] {
+                i += 1;
+            }
+
+            if i < node.keys.len() && key == node.keys[i] {
+                return Some(node.values[i]);
+            }
+
+            if node.is_leaf {
+                return None;
+            }
+
+            current_page_id = node.children[i];
+        }
+    }
+
+    pub fn insert(&mut self, key: i64, value: RecordId) {
+        let mut current_page_id = self.root_page_id;
+
+        loop {
+            let mut node = self.get_node(current_page_id);
+
+            if node.is_leaf {
+                let mut insert_idx = 0;
+                while insert_idx < node.keys.len() && key > node.keys[insert_idx] {
+                    insert_idx += 1;
+                }
+
+                if insert_idx < node.keys.len() && key == node.keys[insert_idx] {
+                    node.values[insert_idx] = value;
+                } else {
+                    node.keys.insert(insert_idx, key);
+                    node.values.insert(insert_idx, value);
+                }
+
+                self.save_node(&node);
+                return;
+            }
+
+            let mut i = 0;
+            while i < node.keys.len() && key > node.keys[i] {
+                i += 1;
+            }
+            current_page_id = node.children[i];
+        }
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +205,48 @@ mod tests {
             assert_eq!(decoded.values[i].page_id, 200);
             assert_eq!(decoded.values[i].slot_id, i as u16);
         }
+    }
+
+    #[test]
+    fn test_disk_btree_search_insert() {
+        use crate::buffer::BufferPoolManager;
+        use crate::disk::DiskManager;
+        use tempfile::NamedTempFile;
+
+        let temp_file = NamedTempFile::new().unwrap();
+        let dm = DiskManager::new(temp_file.path()).unwrap();
+        let bpm = BufferPoolManager::new(10, dm);
+        let pool = Rc::new(RefCell::new(bpm));
+
+        let root_page_id = {
+            let mut p = pool.borrow_mut();
+            let page = p.new_page().unwrap().unwrap();
+            let page_id = page.id;
+            let node = DiskBTreeNode::new(page_id, true);
+            page.data = node.encode();
+            p.unpin_page(page_id, true);
+            page_id
+        };
+
+        let mut tree = DiskBTree::new(pool.clone(), root_page_id);
+
+        tree.insert(10, make_record_id(100, 1));
+        tree.insert(20, make_record_id(100, 2));
+        tree.insert(5, make_record_id(100, 0));
+
+        let result1 = tree.search(10);
+        assert!(result1.is_some());
+        assert_eq!(result1.unwrap().slot_id, 1);
+
+        let result2 = tree.search(20);
+        assert!(result2.is_some());
+        assert_eq!(result2.unwrap().slot_id, 2);
+
+        let result3 = tree.search(5);
+        assert!(result3.is_some());
+        assert_eq!(result3.unwrap().slot_id, 0);
+
+        let result_none = tree.search(99);
+        assert!(result_none.is_none());
     }
 }

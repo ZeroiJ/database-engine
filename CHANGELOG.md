@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Page-Based Storage Architecture (Phase 1, 2, 3 & 4)
+#### Page-Based Storage Architecture (Phase 1-5)
 - **disk.rs**: DiskManager for raw 4KB page I/O
   - `PAGE_SIZE = 4096` bytes
   - `PageId = u32` type
@@ -23,10 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Page table for PageId → pool index mapping
   - Free list and replacer (VecDeque) for LRU
   - `fetch_page()` / `new_page()` / `unpin_page()` / `flush_page()` / `flush_all_pages()` methods
-- **disk_btree.rs**: Disk-aware B-Tree nodes
+- **disk_btree.rs**: Disk-backed B-Tree
   - `DiskBTreeNode` struct: serializable B-Tree node using RecordId pointers
   - `encode()` / `decode()` for 4KB page serialization
   - `DiskBTree` wrapper for buffer pool operations
+  - `search()` method: traverses tree to find RecordId by key
+  - `insert()` method: inserts key-RecordId pair (assumes room)
 - **table_page.rs**: Dedicated row storage pages
   - `TablePage` struct: stores rows in BTreeMap<slot_id, Row>
   - `next_page_id` for linked list of pages
