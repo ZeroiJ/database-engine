@@ -1,9 +1,16 @@
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Result, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const PAGE_SIZE: usize = 4096;
 pub type PageId = u32;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordId {
+    pub page_id: PageId,
+    pub slot_id: u16,
+}
 
 #[derive(Clone)]
 pub struct Page {

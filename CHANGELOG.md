@@ -11,11 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### Page-Based Storage Architecture (Phase 1 & 2)
+#### Page-Based Storage Architecture (Phase 1, 2 & 3)
 - **disk.rs**: DiskManager for raw 4KB page I/O
   - `PAGE_SIZE = 4096` bytes
   - `PageId = u32` type
   - `Page` struct: 4KB chunk with id, data, is_dirty, pin_count
+  - `RecordId` struct: pointer to row (page_id + slot_id)
   - `read_page()` / `write_page()` / `allocate_page()` methods
 - **buffer.rs**: BufferPoolManager with LRU eviction
   - Fixed-size page cache in memory
@@ -23,10 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Free list and replacer (VecDeque) for LRU
   - `fetch_page()` / `new_page()` / `unpin_page()` / `flush_page()` / `flush_all_pages()` methods
 - **disk_btree.rs**: Disk-aware B-Tree nodes
-  - `DiskBTreeNode` struct: serializable B-Tree node using PageIds
+  - `DiskBTreeNode` struct: serializable B-Tree node using RecordId pointers
   - `encode()` / `decode()` for 4KB page serialization
   - `DiskBTree` wrapper for buffer pool operations
-- Unit tests for disk, buffer, and disk_btree modules
+- **table_page.rs**: Dedicated row storage pages
+  - `TablePage` struct: stores rows in BTreeMap<slot_id, Row>
+  - `insert_row()` with size check to prevent 4KB overflow
+  - `get_row()` / `delete_row()` methods
+- Unit tests for all new modules
 
 ---
 

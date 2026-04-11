@@ -1,5 +1,4 @@
-use crate::disk::{PageId, PAGE_SIZE};
-use crate::storage::Row;
+use crate::disk::{PageId, RecordId, PAGE_SIZE};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -7,7 +6,7 @@ pub struct DiskBTreeNode {
     pub page_id: PageId,
     pub is_leaf: bool,
     pub keys: Vec<i64>,
-    pub values: Vec<Row>,
+    pub values: Vec<RecordId>,
     pub children: Vec<PageId>,
 }
 
@@ -75,10 +74,13 @@ impl DiskBTree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::Value;
+    use crate::disk::RecordId;
 
-    fn make_row(id: i64) -> Row {
-        vec![Value::Integer(id), Value::Text(format!("row{}", id))]
+    fn make_record_id(page_id: PageId, slot: u16) -> RecordId {
+        RecordId {
+            page_id,
+            slot_id: slot,
+        }
     }
 
     #[test]
@@ -96,7 +98,11 @@ mod tests {
     fn test_encode_decode_with_data() {
         let mut node = DiskBTreeNode::new(5, false);
         node.keys = vec![10, 20, 30];
-        node.values = vec![make_row(10), make_row(20), make_row(30)];
+        node.values = vec![
+            make_record_id(100, 0),
+            make_record_id(100, 1),
+            make_record_id(100, 2),
+        ];
         node.children = vec![1, 2, 3, 4];
 
         let encoded = node.encode();
@@ -113,7 +119,11 @@ mod tests {
     fn test_encode_decode_leaf_node() {
         let mut node = DiskBTreeNode::new(42, true);
         node.keys = vec![1, 2, 3];
-        node.values = vec![make_row(1), make_row(2), make_row(3)];
+        node.values = vec![
+            make_record_id(50, 0),
+            make_record_id(50, 1),
+            make_record_id(50, 2),
+        ];
 
         let encoded = node.encode();
         let decoded = DiskBTreeNode::decode(&encoded);
@@ -124,20 +134,22 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_large_node() {
+    fn test_roundtrip_many_keys() {
         let mut node = DiskBTreeNode::new(100, true);
-        for i in 0..50 {
+        for i in 0..100 {
             node.keys.push(i as i64);
-            node.values.push(make_row(i as i64));
+            node.values.push(make_record_id(200, i as u16));
         }
 
         let encoded = node.encode();
         let decoded = DiskBTreeNode::decode(&encoded);
 
-        assert_eq!(decoded.keys.len(), 50);
-        assert_eq!(decoded.values.len(), 50);
-        for i in 0..50 {
+        assert_eq!(decoded.keys.len(), 100);
+        assert_eq!(decoded.values.len(), 100);
+        for i in 0..100 {
             assert_eq!(decoded.keys[i], i as i64);
+            assert_eq!(decoded.values[i].page_id, 200);
+            assert_eq!(decoded.values[i].slot_id, i as u16);
         }
     }
 }
