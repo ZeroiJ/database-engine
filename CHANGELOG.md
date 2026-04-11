@@ -48,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **split_child()**: Split full child node, promote median key to parent
 - **test_disk_btree_node_splitting**: Stress test with 300 keys - all pass
 
+#### Phase 7: Thread-Safe Disk Components
+- **Arc<Mutex>**: Changed from Rc<RefCell> for thread safety
+- **TableHeap**: Thread-safe buffer pool access
+- **DiskBTree**: Thread-safe buffer pool access  
+- **TableDisk**: New disk-backed table struct (optional)
+- All 74 tests pass
+
 ---
 
 ## [v0.4.1] - 2026-03-24
