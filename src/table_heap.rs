@@ -2,18 +2,17 @@ use crate::buffer::BufferPoolManager;
 use crate::disk::{PageId, RecordId};
 use crate::storage::Row;
 use crate::table_page::TablePage;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub struct TableHeap {
-    pub buffer_pool: Rc<RefCell<BufferPoolManager>>,
+    pub buffer_pool: Arc<Mutex<BufferPoolManager>>,
     pub first_page_id: PageId,
     pub last_page_id: PageId,
 }
 
 impl TableHeap {
-    pub fn new(buffer_pool: Rc<RefCell<BufferPoolManager>>) -> Self {
-        let mut pool = buffer_pool.borrow_mut();
+    pub fn new(buffer_pool: Arc<Mutex<BufferPoolManager>>) -> Self {
+        let mut pool = buffer_pool.lock().unwrap();
         let page = pool
             .new_page()
             .expect("Buffer pool out of memory")
@@ -31,7 +30,7 @@ impl TableHeap {
     }
 
     pub fn open(
-        buffer_pool: Rc<RefCell<BufferPoolManager>>,
+        buffer_pool: Arc<Mutex<BufferPoolManager>>,
         first_page_id: PageId,
         last_page_id: PageId,
     ) -> Self {
@@ -43,7 +42,7 @@ impl TableHeap {
     }
 
     pub fn insert_row(&mut self, row: Row) -> Result<RecordId, String> {
-        let mut pool = self.buffer_pool.borrow_mut();
+        let mut pool = self.buffer_pool.lock().unwrap();
         let last_page_id = self.last_page_id;
         let page = pool.fetch_page(last_page_id).unwrap().unwrap();
         let mut table_page = TablePage::decode(&page.data);
@@ -80,7 +79,7 @@ impl TableHeap {
     }
 
     pub fn get_row(&self, rid: RecordId) -> Option<Row> {
-        let mut pool = self.buffer_pool.borrow_mut();
+        let mut pool = self.buffer_pool.lock().unwrap();
         let page = pool.fetch_page(rid.page_id).unwrap().unwrap();
         let table_page = TablePage::decode(&page.data);
         let row = table_page.get_row(rid.slot_id).cloned();
@@ -109,7 +108,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let dm = DiskManager::new(temp_file.path()).unwrap();
         let bpm = BufferPoolManager::new(10, dm);
-        let mut heap = TableHeap::new(Rc::new(RefCell::new(bpm)));
+        let mut heap = TableHeap::new(Arc::new(Mutex::new(bpm)));
 
         let rid = heap.insert_row(make_row(1)).unwrap();
         assert_eq!(heap.first_page_id, heap.last_page_id);
@@ -123,7 +122,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let dm = DiskManager::new(temp_file.path()).unwrap();
         let bpm = BufferPoolManager::new(10, dm);
-        let mut heap = TableHeap::new(Rc::new(RefCell::new(bpm)));
+        let mut heap = TableHeap::new(Arc::new(Mutex::new(bpm)));
 
         let mut rids = Vec::new();
         for _i in 0..5 {
@@ -144,7 +143,7 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let dm = DiskManager::new(temp_file.path()).unwrap();
         let bpm = BufferPoolManager::new(10, dm);
-        let mut heap = TableHeap::new(Rc::new(RefCell::new(bpm)));
+        let mut heap = TableHeap::new(Arc::new(Mutex::new(bpm)));
 
         for _ in 0..4 {
             let large = "x".repeat(2000);

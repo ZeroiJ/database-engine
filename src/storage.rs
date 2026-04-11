@@ -1,9 +1,14 @@
 use crate::btree::BTree;
+use crate::buffer::BufferPoolManager;
+use crate::disk::{PageId, RecordId};
+use crate::disk_btree::DiskBTree;
 use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
+use crate::table_heap::TableHeap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub type Row = Vec<Value>;
 
@@ -22,6 +27,57 @@ pub struct Table {
     pub indexes: HashMap<String, Index>,
     #[serde(skip)]
     pub next_row_id: i64,
+}
+
+pub struct TableDisk {
+    pub name: String,
+    pub columns: Vec<ColumnDef>,
+    pub heap: TableHeap,
+    pub primary_index: DiskBTree,
+    pub indexes: HashMap<String, Index>,
+    pub next_row_id: i64,
+    buffer_pool: Arc<Mutex<BufferPoolManager>>,
+}
+
+impl TableDisk {
+    pub fn new(
+        name: String,
+        columns: Vec<ColumnDef>,
+        buffer_pool: Arc<Mutex<BufferPoolManager>>,
+    ) -> Self {
+        let heap = TableHeap::new(buffer_pool.clone());
+        let root_page_id = {
+            let mut pool = buffer_pool.lock().unwrap();
+            let page = pool.new_page().unwrap().unwrap();
+            let id = page.id;
+            pool.unpin_page(id, true);
+            id
+        };
+        let primary_index = DiskBTree::new(buffer_pool.clone(), root_page_id);
+
+        Self {
+            name,
+            columns,
+            heap,
+            primary_index,
+            indexes: HashMap::new(),
+            next_row_id: 1,
+            buffer_pool,
+        }
+    }
+
+    pub fn insert(&mut self, row: Row) -> Result<i64, String> {
+        let pk = self.next_row_id;
+        self.next_row_id += 1;
+        let record_id = self.heap.insert_row(row)?;
+        self.primary_index.insert(pk as i64, record_id);
+        Ok(pk)
+    }
+
+    pub fn select_by_pk(&self, pk: i64) -> Option<Row> {
+        let record_id = self.primary_index.search(pk)?;
+        self.heap.get_row(record_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

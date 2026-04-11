@@ -41,16 +41,15 @@ impl DiskBTreeNode {
 }
 
 use crate::buffer::BufferPoolManager;
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 pub struct DiskBTree {
-    pub buffer_pool: Rc<RefCell<BufferPoolManager>>,
+    pub buffer_pool: Arc<Mutex<BufferPoolManager>>,
     pub root_page_id: PageId,
 }
 
 impl DiskBTree {
-    pub fn new(buffer_pool: Rc<RefCell<BufferPoolManager>>, root_page_id: PageId) -> Self {
+    pub fn new(buffer_pool: Arc<Mutex<BufferPoolManager>>, root_page_id: PageId) -> Self {
         Self {
             buffer_pool,
             root_page_id,
@@ -58,7 +57,7 @@ impl DiskBTree {
     }
 
     pub fn get_node(&self, page_id: PageId) -> DiskBTreeNode {
-        let mut pool = self.buffer_pool.borrow_mut();
+        let mut pool = self.buffer_pool.lock().unwrap();
         let page = pool.fetch_page(page_id).unwrap().unwrap();
         let node = DiskBTreeNode::decode(&page.data);
         pool.unpin_page(page_id, false);
@@ -66,7 +65,7 @@ impl DiskBTree {
     }
 
     pub fn save_node(&self, node: &DiskBTreeNode) {
-        let mut pool = self.buffer_pool.borrow_mut();
+        let mut pool = self.buffer_pool.lock().unwrap();
         let page = pool.fetch_page(node.page_id).unwrap().unwrap();
         page.data = node.encode();
         pool.unpin_page(node.page_id, true);
@@ -100,7 +99,7 @@ impl DiskBTree {
 
         if root.keys.len() >= MAX_KEYS {
             let new_root_id = {
-                let mut pool = self.buffer_pool.borrow_mut();
+                let mut pool = self.buffer_pool.lock().unwrap();
                 let new_page = pool.new_page().unwrap().unwrap();
                 let id = new_page.id;
                 pool.unpin_page(id, true);
@@ -162,7 +161,7 @@ impl DiskBTree {
         let mut parent = self.get_node(parent_page_id);
         let mut full_child = self.get_node(parent.children[child_index]);
 
-        let mut pool = self.buffer_pool.borrow_mut();
+        let mut pool = self.buffer_pool.lock().unwrap();
         let new_page = pool.new_page().unwrap().unwrap();
         let new_sibling_id = new_page.id;
         pool.unpin_page(new_sibling_id, true);
@@ -288,10 +287,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let dm = DiskManager::new(temp_file.path()).unwrap();
         let bpm = BufferPoolManager::new(10, dm);
-        let pool = Rc::new(RefCell::new(bpm));
+        let pool = Arc::new(Mutex::new(bpm));
 
         let root_page_id = {
-            let mut p = pool.borrow_mut();
+            let mut p = pool.lock().unwrap();
             let page = p.new_page().unwrap().unwrap();
             let page_id = page.id;
             let node = DiskBTreeNode::new(page_id, true);
@@ -331,10 +330,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let dm = DiskManager::new(temp_file.path()).unwrap();
         let bpm = BufferPoolManager::new(50, dm);
-        let pool = Rc::new(RefCell::new(bpm));
+        let pool = Arc::new(Mutex::new(bpm));
 
         let root_page_id = {
-            let mut p = pool.borrow_mut();
+            let mut p = pool.lock().unwrap();
             let page = p.new_page().unwrap().unwrap();
             let page_id = page.id;
             let node = DiskBTreeNode::new(page_id, true);
