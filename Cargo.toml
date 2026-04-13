@@ -20,6 +20,10 @@ path = "src/server_bin.rs"
 name = "rustdb-client"
 path = "src/client.rs"
 
+[[bin]]
+name = "rustdb-load-test"
+path = "src/load_tester.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
