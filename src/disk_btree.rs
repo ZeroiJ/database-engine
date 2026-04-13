@@ -106,7 +106,7 @@ impl DiskBTree {
                 id
             };
 
-            let mut new_root = DiskBTreeNode {
+            let new_root = DiskBTreeNode {
                 page_id: new_root_id,
                 is_leaf: false,
                 keys: Vec::new(),
@@ -171,7 +171,7 @@ impl DiskBTree {
         let median_key = full_child.keys[mid_index];
         let median_val = full_child.values[mid_index];
 
-        let mut right_sibling = DiskBTreeNode {
+        let right_sibling = DiskBTreeNode {
             page_id: new_sibling_id,
             is_leaf: full_child.is_leaf,
             keys: full_child.keys.split_off(mid_index + 1),

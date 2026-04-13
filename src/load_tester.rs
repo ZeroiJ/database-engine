@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -41,6 +41,8 @@ fn main() {
 
             let mut local_success = 0;
 
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
             for i in 0..INSERTS_PER_THREAD {
                 let global_id = (thread_id * INSERTS_PER_THREAD) + i;
                 let query = format!(
@@ -49,9 +51,19 @@ fn main() {
                 );
 
                 if stream.write_all(query.as_bytes()).is_ok() {
-                    let mut buf = [0u8; 128];
-                    if stream.read(&mut buf).is_ok() {
-                        local_success += 1;
+                    // Read lines until we hit the terminator, just like the real client
+                    loop {
+                        let mut line = String::new();
+                        match reader.read_line(&mut line) {
+                            Ok(0) => break, // Connection closed
+                            Ok(_) => {
+                                if line.trim() == "--END--" {
+                                    local_success += 1;
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
                     }
                 }
             }

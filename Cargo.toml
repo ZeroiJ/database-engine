@@ -21,7 +21,7 @@ name = "rustdb-client"
 path = "src/client.rs"
 
 [[bin]]
-name = "rustdb-load-test"
+name = "rustdb-hammer"
 path = "src/load_tester.rs"
 
 [dependencies]

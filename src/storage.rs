@@ -1,6 +1,5 @@
 use crate::btree::BTree;
 use crate::buffer::BufferPoolManager;
-use crate::disk::{PageId, RecordId};
 use crate::disk_btree::DiskBTree;
 use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
 use crate::table_heap::TableHeap;
@@ -36,6 +35,7 @@ pub struct TableDisk {
     pub primary_index: DiskBTree,
     pub indexes: HashMap<String, Index>,
     pub next_row_id: i64,
+    #[allow(dead_code)]
     buffer_pool: Arc<Mutex<BufferPoolManager>>,
 }
 
