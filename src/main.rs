@@ -846,7 +846,8 @@ fn main() {
                         );
                         continue;
                     }
-                    if let Some(table) = db.get_table(table_name) {
+                    if let Some(table_lock) = db.get_table(table_name) {
+                        let table = table_lock.read().unwrap();
                         let max_col_len = table
                             .columns
                             .iter()
@@ -906,8 +907,10 @@ fn main() {
                     let total_rows: usize = db
                         .table_names()
                         .iter()
-                        .filter_map(|t| db.get_table(t))
-                        .map(|t| t.rows.inorder().len())
+                        .filter_map(|t| {
+                            let lock = db.get_table(t)?;
+                            Some(lock.read().unwrap().rows.inorder().len())
+                        })
                         .sum();
                     let db_size = if Path::new(&db_path).exists() {
                         std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0)
@@ -922,8 +925,10 @@ fn main() {
                     let max_depth = db
                         .table_names()
                         .iter()
-                        .filter_map(|t| db.get_table(t))
-                        .map(|t| t.rows.depth())
+                        .filter_map(|t| {
+                            let lock = db.get_table(t)?;
+                            Some(lock.read().unwrap().rows.depth())
+                        })
                         .max()
                         .unwrap_or(0);
                     println!("{}", "┌─────────────────────────────────┐".cyan());
@@ -1205,7 +1210,8 @@ fn execute(db: &mut Database, stmt: Statement) -> Result<String, String> {
         } => {
             let table_name = table.clone();
             let (rows, _) = db.select(table, columns, condition, order_by, limit)?;
-            let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
+            let table_lock = db.get_table(&table_name).ok_or("Table not found")?;
+            let table_meta = table_lock.read().unwrap();
             Ok(format_table(&table_meta.columns, &rows))
         }
         Statement::CreateIndex {
@@ -1407,8 +1413,10 @@ fn run_benchmark(db: &mut Database, n: usize) {
     let _ = db.delete("_bench".to_string(), None);
     let delete_time = delete_start.elapsed();
     let _ = db.drop_index("idx_value".to_string());
-    let table = db.get_table("_bench");
-    let btree_depth = table.map(|t| t.rows.depth()).unwrap_or(0);
+    let table_lock = db.get_table("_bench");
+    let btree_depth = table_lock
+        .map(|t| t.read().unwrap().rows.depth())
+        .unwrap_or(0);
     let rows_per_sec = (n as f64 / insert_time.as_secs_f64()) as usize;
     println!();
     println!("{}", format!("╔══════════════════════════════════════════╗\n ║         {}  ║\n ╠══════════════════════════════════════════╣\n ║  INSERT {} rows    →   {:>7.1}ms      ║\n ║  SELECT full scan   →   {:>7.1}ms      ║\n ║  SELECT by id       →   {:>7.1}ms      ║\n ║  CREATE INDEX      →   {:>7.1}ms      ║\n ║  SELECT with index →   {:>7.1}ms      ║\n ║  DELETE all rows   →   {:>7.1}ms      ║\n ╠══════════════════════════════════════════╣\n ║  B-Tree depth       →   {:>7}            ║\n ║  Rows/sec (insert)  →   {:>7},{}       ║\n ╚══════════════════════════════════════════╝", format!("rustdb benchmark — {} rows", n), n, insert_time.as_secs_f64() * 1000.0, select_full_time.as_secs_f64() * 1000.0, select_id_time.as_secs_f64() * 1000.0, index_time.as_secs_f64() * 1000.0, select_index_time.as_secs_f64() * 1000.0, delete_time.as_secs_f64() * 1000.0, btree_depth, (rows_per_sec / 1000).to_string().yellow(), (rows_per_sec % 1000).to_string().yellow()).cyan().bold());

@@ -31,7 +31,9 @@ pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
         _ => return None,
     };
 
-    let table_meta = db.get_table(&table)?;
+    let table_arc = db.get_table(&table)?;
+    let table_lock = table_arc.read().unwrap();
+    let table_meta = &table_lock;
     let total_rows = table_meta.rows.inorder().len();
 
     let (scan_type, estimated_rows, condition_str) = match &condition {

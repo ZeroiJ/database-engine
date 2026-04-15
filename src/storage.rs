@@ -80,17 +80,43 @@ impl TableDisk {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Database {
-    pub tables: RwLock<HashMap<String, Arc<RwLock<Table>>>>,
-    index_names: HashMap<String, String>,
+    pub tables: Arc<RwLock<HashMap<String, Arc<RwLock<Table>>>>>,
+    pub index_names: Arc<RwLock<HashMap<String, String>>>,
+    pub next_id: Arc<RwLock<u64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableDatabase {
+    pub tables: HashMap<String, Table>,
+    pub index_names: HashMap<String, String>,
+    pub next_id: u64,
+}
+
+impl From<&Database> for SerializableDatabase {
+    fn from(db: &Database) -> Self {
+        let tables: HashMap<String, Table> = db
+            .tables
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.read().unwrap().clone()))
+            .collect();
+        SerializableDatabase {
+            tables,
+            index_names: db.index_names.read().unwrap().clone(),
+            next_id: *db.next_id.read().unwrap(),
+        }
+    }
 }
 
 impl Database {
     pub fn new() -> Self {
         Database {
-            tables: RwLock::new(HashMap::new()),
-            index_names: HashMap::new(),
+            tables: Arc::new(RwLock::new(HashMap::new())),
+            index_names: Arc::new(RwLock::new(HashMap::new())),
+            next_id: Arc::new(RwLock::new(1u64)),
         }
     }
 
@@ -183,14 +209,19 @@ impl Database {
             },
         );
 
-        self.index_names.insert(index_name, table.name.clone());
+        self.index_names
+            .write()
+            .unwrap()
+            .insert(index_name, table.name.clone());
 
         Ok(())
     }
 
-    pub fn drop_index(&mut self, index_name: String) -> Result<(), String> {
+    pub fn drop_index(&self, index_name: String) -> Result<(), String> {
         let table_name = self
             .index_names
+            .write()
+            .unwrap()
             .get(&index_name)
             .ok_or_else(|| format!("Index '{}' not found", index_name))?
             .clone();
@@ -199,7 +230,7 @@ impl Database {
         let mut table = table_lock.write().unwrap();
 
         table.indexes.remove(&index_name);
-        self.index_names.remove(&index_name);
+        self.index_names.write().unwrap().remove(&index_name);
 
         Ok(())
     }
@@ -212,13 +243,15 @@ impl Database {
 
         let indexes_to_remove: Vec<String> = self
             .index_names
+            .read()
+            .unwrap()
             .iter()
             .filter(|(_, t)| *t == &table_name)
             .map(|(idx, _)| idx.clone())
             .collect();
 
         for idx in indexes_to_remove {
-            self.index_names.remove(&idx);
+            self.index_names.write().unwrap().remove(&idx);
         }
 
         tables.remove(&table_name);
@@ -291,9 +324,15 @@ impl Database {
         table.next_row_id += 1;
         table.rows.insert(row_id, values.clone());
 
-        for (_, index) in &mut table.indexes {
-            let col_idx = table
-                .columns
+        let columns_snapshot: Vec<ColumnDef> = table.columns.clone();
+        let indexes_snapshot: Vec<(String, Index)> = table
+            .indexes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (index_name, mut index) in indexes_snapshot {
+            let col_idx = columns_snapshot
                 .iter()
                 .position(|c| c.name == index.column)
                 .unwrap();
@@ -306,6 +345,7 @@ impl Database {
                 } else {
                     index.tree.insert(key, vec![row_id]);
                 }
+                table.indexes.insert(index_name, index);
             }
         }
 
@@ -522,11 +562,17 @@ impl Database {
             table.rows.delete(*key);
         }
 
-        for (_, index) in &mut table.indexes {
+        let columns_snapshot: Vec<ColumnDef> = table.columns.clone();
+        let indexes_snapshot: Vec<(String, Index)> = table
+            .indexes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        for (index_name, mut index) in indexes_snapshot {
             for key in &keys_to_delete {
                 if let Some(row) = table.rows.search(*key) {
-                    let col_idx = table
-                        .columns
+                    let col_idx = columns_snapshot
                         .iter()
                         .position(|c| c.name == index.column)
                         .unwrap();
@@ -543,6 +589,7 @@ impl Database {
                     }
                 }
             }
+            table.indexes.insert(index_name, index);
         }
 
         Ok(keys_to_delete.len())
@@ -753,11 +800,6 @@ impl Database {
         }
     }
 
-    pub fn get_table(&self, name: &str) -> Option<Arc<RwLock<Table>>> {
-        let tables = self.tables.read().unwrap();
-        tables.get(name).cloned()
-    }
-
     pub fn table_count(&self) -> usize {
         self.tables.read().unwrap().len()
     }
@@ -767,7 +809,8 @@ impl Database {
     }
 
     pub fn save(&self, path: &str) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
+        let serializable = SerializableDatabase::from(self);
+        let json = serde_json::to_string_pretty(&serializable)
             .map_err(|e| format!("Serialization error: {}", e))?;
         fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
         Ok(())
@@ -778,8 +821,20 @@ impl Database {
             return Ok(Database::new());
         }
         let content = fs::read_to_string(path).map_err(|e| format!("Read error: {}", e))?;
-        let db: Database =
+        let serializable: SerializableDatabase =
             serde_json::from_str(&content).map_err(|e| format!("Deserialization error: {}", e))?;
+
+        let tables: HashMap<String, Arc<RwLock<Table>>> = serializable
+            .tables
+            .into_iter()
+            .map(|(k, v)| (k, Arc::new(RwLock::new(v))))
+            .collect();
+
+        let db = Database {
+            tables: Arc::new(RwLock::new(tables)),
+            index_names: Arc::new(RwLock::new(serializable.index_names)),
+            next_id: Arc::new(RwLock::new(serializable.next_id)),
+        };
         Ok(db)
     }
 }

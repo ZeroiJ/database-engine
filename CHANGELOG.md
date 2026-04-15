@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Per-Table Locking with Arc<RwLock> (Phase 10)
+- **Per-table locking**: Database now uses `Arc<RwLock<HashMap<String, Arc<RwLock<Table>>>>` for fine-grained locking
+  - Multiple threads can operate on different tables simultaneously
+  - Reduced contention compared to global table lock
+  - Each table wrapped in its own RwLock for concurrent access
+- **index_names locking**: `Arc<RwLock<HashMap<String, String>>` for thread-safe index lookups
+- **next_id locking**: `Arc<RwLock<u64>>` for thread-safe auto-increment ID generation
+- **SerializableDatabase**: Manual serialization struct to handle Arc-wrapped fields
+- **Fixed borrow checker issues**: Restructured loops in insert() and delete() to avoid borrow conflicts
+
 #### Performance Optimizations (Phase 9)
 - **bincode serialization**: Replaced serde_json with bincode for hot paths (WAL, B-Tree pages)
   - Binary encoding eliminates JSON text-parsing overhead
