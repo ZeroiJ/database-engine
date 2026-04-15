@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub type Row = Vec<Value>;
 
@@ -82,34 +82,37 @@ impl TableDisk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Database {
-    tables: HashMap<String, Table>,
+    pub tables: RwLock<HashMap<String, Arc<RwLock<Table>>>>,
     index_names: HashMap<String, String>,
 }
 
 impl Database {
     pub fn new() -> Self {
         Database {
-            tables: HashMap::new(),
+            tables: RwLock::new(HashMap::new()),
             index_names: HashMap::new(),
         }
     }
 
-    pub fn create_table(&mut self, name: String, columns: Vec<ColumnDef>) -> Result<(), String> {
-        if self.tables.contains_key(&name) {
+    pub fn create_table(&self, name: String, columns: Vec<ColumnDef>) -> Result<(), String> {
+        let mut tables = self.tables.write().unwrap();
+        if tables.contains_key(&name) {
             return Err(format!("Table '{}' already exists", name));
         }
-        let table_name = name.clone();
-        self.tables.insert(
-            name,
-            Table {
-                name: table_name,
-                columns,
-                rows: BTree::new(2),
-                indexes: HashMap::new(),
-                next_row_id: 1,
-            },
-        );
+        let table = Table {
+            name: name.clone(),
+            columns,
+            rows: BTree::new(2),
+            indexes: HashMap::new(),
+            next_row_id: 1,
+        };
+        tables.insert(name, Arc::new(RwLock::new(table)));
         Ok(())
+    }
+
+    pub fn get_table(&self, name: &str) -> Option<Arc<RwLock<Table>>> {
+        let tables = self.tables.read().unwrap();
+        tables.get(name).cloned()
     }
 
     fn value_to_index_key(value: &Value) -> i64 {
@@ -136,15 +139,15 @@ impl Database {
     }
 
     pub fn create_index(
-        &mut self,
+        &self,
         table: String,
         index_name: String,
         column: String,
     ) -> Result<(), String> {
-        let table = self
-            .tables
-            .get_mut(&table)
+        let table_lock = self
+            .get_table(&table)
             .ok_or_else(|| format!("Table not found: {}", table))?;
+        let mut table = table_lock.write().unwrap();
 
         if table.indexes.contains_key(&index_name) {
             return Err(format!("Index '{}' already exists", index_name));
@@ -192,7 +195,8 @@ impl Database {
             .ok_or_else(|| format!("Index '{}' not found", index_name))?
             .clone();
 
-        let table = self.tables.get_mut(&table_name).ok_or("Table not found")?;
+        let table_lock = self.get_table(&table_name).ok_or("Table not found")?;
+        let mut table = table_lock.write().unwrap();
 
         table.indexes.remove(&index_name);
         self.index_names.remove(&index_name);
@@ -200,8 +204,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn drop_table(&mut self, table_name: String) -> Result<(), String> {
-        if !self.tables.contains_key(&table_name) {
+    pub fn drop_table(&self, table_name: String) -> Result<(), String> {
+        let mut tables = self.tables.write().unwrap();
+        if !tables.contains_key(&table_name) {
             return Err(format!("Table '{}' not found", table_name));
         }
 
@@ -216,15 +221,15 @@ impl Database {
             self.index_names.remove(&idx);
         }
 
-        self.tables.remove(&table_name);
+        tables.remove(&table_name);
         Ok(())
     }
 
-    pub fn insert(&mut self, table: String, values: Vec<Value>) -> Result<i64, String> {
-        let table = self
-            .tables
-            .get_mut(&table)
+    pub fn insert(&self, table: String, values: Vec<Value>) -> Result<i64, String> {
+        let table_lock = self
+            .get_table(&table)
             .ok_or_else(|| format!("Table not found: {}", table))?;
+        let mut table = table_lock.write().unwrap();
 
         if values.len() != table.columns.len() {
             return Err(format!(
@@ -315,10 +320,10 @@ impl Database {
         order_by: Option<(String, bool)>,
         limit: Option<usize>,
     ) -> Result<(Vec<Row>, bool), String> {
-        let table = self
-            .tables
-            .get(&table)
+        let table_lock = self
+            .get_table(&table)
             .ok_or_else(|| format!("Table not found: {}", table))?;
+        let table = table_lock.read().unwrap();
 
         let column_indices: Vec<usize> = if columns.contains(&"*".to_string()) {
             (0..table.columns.len()).collect()
@@ -491,15 +496,11 @@ impl Database {
         Ok((results, used_index))
     }
 
-    pub fn delete(
-        &mut self,
-        table: String,
-        condition: Option<WhereClause>,
-    ) -> Result<usize, String> {
-        let table = self
-            .tables
-            .get_mut(&table)
+    pub fn delete(&self, table: String, condition: Option<WhereClause>) -> Result<usize, String> {
+        let table_lock = self
+            .get_table(&table)
             .ok_or_else(|| format!("Table not found: {}", table))?;
+        let mut table = table_lock.write().unwrap();
 
         let columns = table.columns.clone();
 
@@ -548,16 +549,16 @@ impl Database {
     }
 
     pub fn update(
-        &mut self,
+        &self,
         table: String,
         column: String,
         value: Value,
         condition: Option<WhereClause>,
     ) -> Result<usize, String> {
-        let table = self
-            .tables
-            .get_mut(&table)
+        let table_lock = self
+            .get_table(&table)
             .ok_or_else(|| format!("Table not found: {}", table))?;
+        let mut table = table_lock.write().unwrap();
 
         let col_idx = table
             .columns
@@ -752,16 +753,17 @@ impl Database {
         }
     }
 
-    pub fn get_table(&self, name: &str) -> Option<&Table> {
-        self.tables.get(name)
+    pub fn get_table(&self, name: &str) -> Option<Arc<RwLock<Table>>> {
+        let tables = self.tables.read().unwrap();
+        tables.get(name).cloned()
     }
 
     pub fn table_count(&self) -> usize {
-        self.tables.len()
+        self.tables.read().unwrap().len()
     }
 
     pub fn table_names(&self) -> Vec<String> {
-        self.tables.keys().cloned().collect()
+        self.tables.read().unwrap().keys().cloned().collect()
     }
 
     pub fn save(&self, path: &str) -> Result<(), String> {

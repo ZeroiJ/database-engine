@@ -49,7 +49,7 @@ pub fn start(db_path: String, port: u16) {
         }
     }
 
-    let db = Arc::new(RwLock::new(db));
+    let db = Arc::new(db);
     let db_path = Arc::new(db_path);
     let wal_path = Arc::new(wal_path);
     let connection_count = Arc::new(Mutex::new(0usize));
@@ -80,7 +80,7 @@ pub fn start(db_path: String, port: u16) {
 
 fn handle_client(
     mut stream: TcpStream,
-    db: Arc<RwLock<Database>>,
+    db: Arc<Database>,
     db_path: Arc<String>,
     wal_path: Arc<String>,
     connection_count: Arc<Mutex<usize>>,
@@ -131,10 +131,7 @@ fn handle_client(
         }
 
         if input == ".tables" {
-            let tables = {
-                let db = db.read().unwrap();
-                db.table_names()
-            };
+            let tables = db.table_names();
             let mut response = String::new();
             if tables.is_empty() {
                 response.push_str("(no tables)\n");
@@ -155,11 +152,9 @@ fn handle_client(
             if table_name.is_empty() {
                 response.push_str("Usage: .schema <table_name>\n");
             } else {
-                let table = {
-                    let db = db.read().unwrap();
-                    db.get_table(table_name).cloned()
-                };
-                if let Some(table) = table {
+                let table_lock = db.get_table(table_name);
+                if let Some(table_lock) = table_lock {
+                    let table = table_lock.read().unwrap();
                     response.push_str(&format!("Table: {}\n", table_name));
                     for col in &table.columns {
                         let type_str = match col.data_type {
@@ -181,13 +176,14 @@ fn handle_client(
 
         if input == ".stats" {
             let (tables, total_rows, db_size, wal_size) = {
-                let db = db.read().unwrap();
                 let tables = db.table_count();
                 let total_rows: usize = db
                     .table_names()
                     .iter()
-                    .filter_map(|t| db.get_table(t))
-                    .map(|t| t.rows.inorder().len())
+                    .filter_map(|t| {
+                        db.get_table(t)
+                            .map(|l| l.read().unwrap().rows.inorder().len())
+                    })
                     .sum();
                 let db_size = std::fs::metadata(db_path.as_str())
                     .map(|m| m.len())
@@ -276,17 +272,14 @@ fn handle_client(
         };
 
         let (result, should_save) = if !is_mutation {
-            let db = db.read().unwrap();
             let result = execute_read(&db, &stmt);
             (result, false)
         } else {
-            let mut db = db.write().unwrap();
-
             if let Some(ref entry) = wal_entry {
                 wal::append(&wal_path, entry).ok();
             }
 
-            let result = execute_write(&mut db, stmt);
+            let result = execute_write(&db, stmt);
             let should_save = db.save(&db_path).is_ok();
             (result, should_save)
         };
@@ -332,9 +325,20 @@ fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
             order_by,
             limit,
         } => {
-            let table_name = table.clone();
-            let (rows, _) = db.select(table.clone(), columns.clone(), condition.clone(), order_by.clone(), limit.clone())?;
-            let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
+            let table_lock = db
+                .get_table(table)
+                .ok_or_else(|| format!("Table not found: {}", table))?;
+            let table = table_lock.read().unwrap();
+            let table_name = table.name.clone();
+            let columns = columns.clone();
+            let condition = condition.clone();
+            let order_by = order_by.clone();
+            let limit = limit.clone();
+            drop(table);
+
+            let (rows, _) = db.select(table_name, columns, condition, order_by, limit)?;
+            let table_lock = db.get_table(table).ok_or("Table not found")?;
+            let table_meta = table_lock.read().unwrap();
             Ok(format_table_plain(&table_meta.columns, &rows))
         }
         Statement::Explain { inner } => {
@@ -348,7 +352,7 @@ fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
     }
 }
 
-fn execute_write(db: &mut Database, stmt: Statement) -> Result<String, String> {
+fn execute_write(db: &Database, stmt: Statement) -> Result<String, String> {
     match stmt {
         Statement::CreateTable { table, columns } => {
             db.create_table(table.clone(), columns)?;
@@ -372,11 +376,24 @@ fn execute_write(db: &mut Database, stmt: Statement) -> Result<String, String> {
         }
         Statement::Delete { table, condition } => {
             let count = db.delete(table, condition)?;
-            Ok(format!("✓ {} {} deleted", count, if count == 1 { "row" } else { "rows" }))
+            Ok(format!(
+                "✓ {} {} deleted",
+                count,
+                if count == 1 { "row" } else { "rows" }
+            ))
         }
-        Statement::Update { table, column, value, condition } => {
+        Statement::Update {
+            table,
+            column,
+            value,
+            condition,
+        } => {
             let count = db.update(table, column, value, condition)?;
-            Ok(format!("{} {} updated", count, if count == 1 { "row" } else { "rows" }))
+            Ok(format!(
+                "{} {} updated",
+                count,
+                if count == 1 { "row" } else { "rows" }
+            ))
         }
         _ => Err("Write operation required".to_string()),
     }
