@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Performance Optimizations (Phase 9)
+- **bincode serialization**: Replaced serde_json with bincode for hot paths (WAL, B-Tree pages)
+  - Binary encoding eliminates JSON text-parsing overhead
+  - DiskBTree encode/decode: bincode::serialize/deserialize
+  - TablePage encode/decode: bincode serialization
+  - WAL append/read: binary format with length prefix
+- **RwLock concurrency**: Replaced global Mutex with RwLock
+  - Concurrent reads: Multiple threads can search B-Tree simultaneously
+  - Read path: SELECT, EXPLAIN use db.read()
+  - Write path: CREATE, INSERT, UPDATE, DELETE use db.write()
+
 #### Page-Based Storage Architecture (Phase 1-6)
 - **disk.rs**: DiskManager for raw 4KB page I/O
   - `PAGE_SIZE = 4096` bytes

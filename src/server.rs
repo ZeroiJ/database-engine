@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 pub fn start(db_path: String, port: u16) {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|_| {
@@ -49,7 +49,7 @@ pub fn start(db_path: String, port: u16) {
         }
     }
 
-    let db = Arc::new(Mutex::new(db));
+    let db = Arc::new(RwLock::new(db));
     let db_path = Arc::new(db_path);
     let wal_path = Arc::new(wal_path);
     let connection_count = Arc::new(Mutex::new(0usize));
@@ -80,7 +80,7 @@ pub fn start(db_path: String, port: u16) {
 
 fn handle_client(
     mut stream: TcpStream,
-    db: Arc<Mutex<Database>>,
+    db: Arc<RwLock<Database>>,
     db_path: Arc<String>,
     wal_path: Arc<String>,
     connection_count: Arc<Mutex<usize>>,
@@ -132,7 +132,7 @@ fn handle_client(
 
         if input == ".tables" {
             let tables = {
-                let db = db.lock().unwrap();
+                let db = db.read().unwrap();
                 db.table_names()
             };
             let mut response = String::new();
@@ -156,7 +156,7 @@ fn handle_client(
                 response.push_str("Usage: .schema <table_name>\n");
             } else {
                 let table = {
-                    let db = db.lock().unwrap();
+                    let db = db.read().unwrap();
                     db.get_table(table_name).cloned()
                 };
                 if let Some(table) = table {
@@ -181,7 +181,7 @@ fn handle_client(
 
         if input == ".stats" {
             let (tables, total_rows, db_size, wal_size) = {
-                let db = db.lock().unwrap();
+                let db = db.read().unwrap();
                 let tables = db.table_count();
                 let total_rows: usize = db
                     .table_names()
@@ -275,19 +275,19 @@ fn handle_client(
             None
         };
 
-        let (result, should_save) = {
-            let mut db = db.lock().unwrap();
+        let (result, should_save) = if !is_mutation {
+            let db = db.read().unwrap();
+            let result = execute_read(&db, &stmt);
+            (result, false)
+        } else {
+            let mut db = db.write().unwrap();
 
             if let Some(ref entry) = wal_entry {
                 wal::append(&wal_path, entry).ok();
             }
 
-            let result = execute_server(&mut db, stmt);
-            let should_save = if is_mutation {
-                db.save(&db_path).is_ok()
-            } else {
-                false
-            };
+            let result = execute_write(&mut db, stmt);
+            let should_save = db.save(&db_path).is_ok();
             (result, should_save)
         };
 
@@ -323,16 +323,8 @@ fn handle_client(
     );
 }
 
-fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> {
+fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
     match stmt {
-        Statement::CreateTable { table, columns } => {
-            db.create_table(table.clone(), columns)?;
-            Ok(format!("✓ Table '{}' created", table))
-        }
-        Statement::Insert { table, values } => {
-            let row_id = db.insert(table.clone(), values)?;
-            Ok(format!("✓ row inserted (id: {})", row_id))
-        }
         Statement::Select {
             table,
             columns,
@@ -341,9 +333,30 @@ fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> 
             limit,
         } => {
             let table_name = table.clone();
-            let (rows, _) = db.select(table, columns, condition, order_by, limit)?;
+            let (rows, _) = db.select(table, columns.clone(), condition.clone(), order_by.clone(), limit.clone())?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
             Ok(format_table_plain(&table_meta.columns, &rows))
+        }
+        Statement::Explain { inner } => {
+            if let Some(query_plan) = planner::plan(db, inner) {
+                Ok(planner::format_plan(&query_plan))
+            } else {
+                Ok("EXPLAIN only supported for SELECT statements".to_string())
+            }
+        }
+        _ => Err("Read-only operation".to_string()),
+    }
+}
+
+fn execute_write(db: &mut Database, stmt: Statement) -> Result<String, String> {
+    match stmt {
+        Statement::CreateTable { table, columns } => {
+            db.create_table(table.clone(), columns)?;
+            Ok(format!("✓ Table '{}' created", table))
+        }
+        Statement::Insert { table, values } => {
+            let row_id = db.insert(table.clone(), values)?;
+            Ok(format!("✓ row inserted (id: {})", row_id))
         }
         Statement::CreateIndex {
             index_name,
@@ -359,32 +372,13 @@ fn execute_server(db: &mut Database, stmt: Statement) -> Result<String, String> 
         }
         Statement::Delete { table, condition } => {
             let count = db.delete(table, condition)?;
-            Ok(format!(
-                "✓ {} {} deleted",
-                count,
-                if count == 1 { "row" } else { "rows" }
-            ))
+            Ok(format!("✓ {} {} deleted", count, if count == 1 { "row" } else { "rows" }))
         }
-        Statement::Update {
-            table,
-            column,
-            value,
-            condition,
-        } => {
+        Statement::Update { table, column, value, condition } => {
             let count = db.update(table, column, value, condition)?;
-            Ok(format!(
-                "{} {} updated",
-                count,
-                if count == 1 { "row" } else { "rows" }
-            ))
+            Ok(format!("{} {} updated", count, if count == 1 { "row" } else { "rows" }))
         }
-        Statement::Explain { inner } => {
-            if let Some(query_plan) = planner::plan(db, &*inner) {
-                Ok(planner::format_plan(&query_plan))
-            } else {
-                Ok("EXPLAIN only supported for SELECT statements".to_string())
-            }
-        }
+        _ => Err("Write operation required".to_string()),
     }
 }
 

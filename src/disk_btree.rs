@@ -25,7 +25,7 @@ impl DiskBTreeNode {
 
     pub fn encode(&self) -> [u8; PAGE_SIZE] {
         let mut buffer = [0u8; PAGE_SIZE];
-        let serialized = serde_json::to_vec(self).expect("Failed to serialize node");
+        let serialized = bincode::serialize(self).expect("Failed to serialize node");
         assert!(
             serialized.len() <= PAGE_SIZE,
             "Node exceeds 4KB page size! Data too large."
@@ -35,8 +35,7 @@ impl DiskBTreeNode {
     }
 
     pub fn decode(buffer: &[u8; PAGE_SIZE]) -> Self {
-        let len = buffer.iter().position(|&b| b == 0).unwrap_or(PAGE_SIZE);
-        serde_json::from_slice(&buffer[..len]).expect("Failed to deserialize node")
+        bincode::deserialize(buffer).expect("Failed to deserialize node")
     }
 }
 

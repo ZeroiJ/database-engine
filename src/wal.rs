@@ -1,7 +1,7 @@
 use crate::parser::{ColumnDef, Value, WhereClause};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WalEntry {
@@ -34,7 +34,6 @@ pub enum WalEntry {
     Checkpoint,
 }
 
-/// Appends a WAL entry as a JSON line to the WAL file.
 pub fn append(path: &str, entry: &WalEntry) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
@@ -42,10 +41,12 @@ pub fn append(path: &str, entry: &WalEntry) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("Failed to open WAL file: {}", e))?;
 
-    let json = serde_json::to_string(entry)
+    let encoded = bincode::serialize(entry)
         .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
 
-    writeln!(file, "{}", json).map_err(|e| format!("Failed to write to WAL: {}", e))?;
+    let len_bytes = (encoded.len() as u32).to_le_bytes();
+    file.write_all(&len_bytes).map_err(|e| format!("Failed to write length: {}", e))?;
+    file.write_all(&encoded).map_err(|e| format!("Failed to write to WAL: {}", e))?;
 
     file.sync_all()
         .map_err(|e| format!("Failed to sync WAL: {}", e))?;
@@ -53,36 +54,37 @@ pub fn append(path: &str, entry: &WalEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads all WAL entries from the WAL file.
 pub fn read(path: &str) -> Result<Vec<WalEntry>, String> {
     if !std::path::Path::new(path).exists() {
         return Ok(Vec::new());
     }
 
-    let file =
+    let mut file =
         File::open(path).map_err(|e| format!("Failed to open WAL file for reading: {}", e))?;
 
-    let reader = BufReader::new(file);
+    let metadata = file.metadata().map_err(|e| format!("Failed to get WAL metadata: {}", e))?;
+    let mut buffer = vec![0u8; metadata.len() as usize];
+    file.read_all(&mut buffer).map_err(|e| format!("Failed to read WAL file: {}", e))?;
+
     let mut entries = Vec::new();
+    let mut offset = 0;
 
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| format!("Failed to read WAL line {}: {}", line_num + 1, e))?;
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    while offset < buffer.len() {
+        if offset + 4 > buffer.len() {
+            break;
         }
+        let len_bytes: [u8; 4] = buffer[offset..offset + 4].try_into().unwrap();
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        offset += 4;
 
-        let entry: WalEntry = serde_json::from_str(trimmed).map_err(|e| {
-            format!(
-                "Failed to parse WAL entry on line {}: {} (content: {})",
-                line_num + 1,
-                e,
-                trimmed
-            )
-        })?;
-
+        if offset + len > buffer.len() {
+            break;
+        }
+        let entry_bytes = &buffer[offset..offset + len];
+        let entry: WalEntry = bincode::deserialize(entry_bytes)
+            .map_err(|e| format!("Failed to deserialize WAL entry: {}", e))?;
         entries.push(entry);
+        offset += len;
     }
 
     Ok(entries)

@@ -23,7 +23,7 @@ impl TablePage {
 
     pub fn encode(&self) -> [u8; PAGE_SIZE] {
         let mut buffer = [0u8; PAGE_SIZE];
-        let serialized = serde_json::to_vec(self).expect("Failed to serialize TablePage");
+        let serialized = bincode::serialize(self).expect("Failed to serialize TablePage");
         assert!(
             serialized.len() <= PAGE_SIZE,
             "TablePage exceeds 4KB limit!"
@@ -33,8 +33,7 @@ impl TablePage {
     }
 
     pub fn decode(buffer: &[u8; PAGE_SIZE]) -> Self {
-        let len = buffer.iter().position(|&b| b == 0).unwrap_or(PAGE_SIZE);
-        serde_json::from_slice(&buffer[..len]).expect("Failed to deserialize TablePage")
+        bincode::deserialize(buffer).expect("Failed to deserialize TablePage")
     }
 
     pub fn insert_row(&mut self, row: Row) -> Result<u16, &'static str> {
@@ -42,7 +41,7 @@ impl TablePage {
         temp.rows.insert(temp.next_slot_id, row.clone());
         temp.next_slot_id += 1;
 
-        let serialized = serde_json::to_vec(&temp).map_err(|_| "Serialization error")?;
+        let serialized = bincode::serialize(&temp).map_err(|_| "Serialization error")?;
 
         if serialized.len() > PAGE_SIZE {
             return Err("Page Full");
