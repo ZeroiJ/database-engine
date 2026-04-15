@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub fn start(db_path: String, port: u16) {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|_| {
@@ -333,7 +333,7 @@ fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
             limit,
         } => {
             let table_name = table.clone();
-            let (rows, _) = db.select(table, columns.clone(), condition.clone(), order_by.clone(), limit.clone())?;
+            let (rows, _) = db.select(table.clone(), columns.clone(), condition.clone(), order_by.clone(), limit.clone())?;
             let table_meta = db.get_table(&table_name).ok_or("Table not found")?;
             Ok(format_table_plain(&table_meta.columns, &rows))
         }

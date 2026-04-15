@@ -1,7 +1,7 @@
 use crate::parser::{ColumnDef, Value, WhereClause};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WalEntry {
@@ -64,7 +64,8 @@ pub fn read(path: &str) -> Result<Vec<WalEntry>, String> {
 
     let metadata = file.metadata().map_err(|e| format!("Failed to get WAL metadata: {}", e))?;
     let mut buffer = vec![0u8; metadata.len() as usize];
-    file.read_all(&mut buffer).map_err(|e| format!("Failed to read WAL file: {}", e))?;
+    file.read_exact(&mut buffer)
+        .map_err(|e| format!("Failed to read WAL file: {}", e))?;
 
     let mut entries = Vec::new();
     let mut offset = 0;
