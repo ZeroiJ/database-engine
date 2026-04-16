@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -10,6 +10,21 @@ const NUM_THREADS: usize = 10;
 const INSERTS_PER_THREAD: usize = 5000;
 const TIMEOUT_SECS: u64 = 5;
 
+fn read_until_end(reader: &mut BufReader<TcpStream>) -> bool {
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return false,
+            Ok(_) => {
+                if line.contains("--END--") {
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 fn main() {
     println!("Starting rustdb Concurrency Hammer (Phase 10)...");
     println!("Target: {}", SERVER_ADDR);
@@ -18,10 +33,6 @@ fn main() {
     println!("Timeout: {} seconds", TIMEOUT_SECS);
     println!("Mode: Per-table locking (each thread hits its own table)");
     println!();
-
-    if let Ok(mut stream) = TcpStream::connect(SERVER_ADDR) {
-        stream.write_all(b".exit\n").ok();
-    }
 
     let success_count = Arc::new(AtomicUsize::new(0));
     let mut handles = vec![];
@@ -54,44 +65,40 @@ fn main() {
             let table_name = format!("market_data_{}", tid);
             stream.set_nonblocking(false).ok();
 
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() || !line.contains("ready") {
+                eprintln!("Thread {}: didn't get ready banner", tid);
+                return;
+            }
+
             let create_cmd = format!(
-                "CREATE TABLE {} (id INT, item_name TEXT, price FLOAT)\n",
+                "CREATE TABLE {} (id INT, item_name TEXT, price FLOAT)",
                 table_name
             );
-            stream.write_all(create_cmd.as_bytes()).unwrap();
-            let mut buf = [0u8; 512];
-            let _ = stream.read(&mut buf);
+            stream
+                .write_all(format!("{}\n", create_cmd).as_bytes())
+                .unwrap();
+            if !read_until_end(&mut reader) {
+                eprintln!("Thread {}: CREATE TABLE failed", tid);
+                return;
+            }
 
             let mut local_success = 0;
-
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
 
             for i in 0..INSERTS_PER_THREAD {
                 let row_id = (tid * INSERTS_PER_THREAD) + i;
                 let query = format!(
-                    "INSERT INTO {} VALUES ({}, 'item_{}', 99.5)\n",
+                    "INSERT INTO {} VALUES ({}, 'item_{}', 99.5)",
                     table_name, row_id, row_id
                 );
 
-                if stream.write_all(query.as_bytes()).is_ok() {
-                    let mut found_end = false;
-                    for _ in 0..50 {
-                        let mut line = String::new();
-                        match reader.read_line(&mut line) {
-                            Ok(0) => break,
-                            Ok(_) => {
-                                if line.contains("--END--") {
-                                    local_success += 1;
-                                    found_end = true;
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    if !found_end {
-                        break;
-                    }
+                if stream.write_all(format!("{}\n", query).as_bytes()).is_err() {
+                    break;
+                }
+                if read_until_end(&mut reader) {
+                    local_success += 1;
                 } else {
                     break;
                 }
