@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### WAL Robustness (Phase 11)
+- **Graceful recovery**: WAL entries that fail to deserialize are skipped, not fatal
+  - Old-format or corrupted WAL files no longer crash the database
+  - Read continues processing valid entries after corruption
+- **WAL header**: New WAL files start with magic bytes + version for format detection
+  - Magic: `b"RUSTDBWL"` (8 bytes)
+  - Version: u16 (currently version 1)
+  - Read function detects version and handles accordingly
+- **Migration path**: Old WAL files without magic are read as v0 format automatically
+
+#### Hammer Test Improvements (Phase 11)
+- **5-second timeout**: Test now has hard timeout to prevent hangs
+- **Progress output**: Prints current insert count and TPS every second
+- **TPS reporting**: Shows actual throughput at completion
+- **Graceful timeout handling**: Reports any lost inserts if timeout hits
+
 #### Per-Table Locking with Arc<RwLock> (Phase 10)
 - **Per-table locking**: Database now uses `Arc<RwLock<HashMap<String, Arc<RwLock<Table>>>>` for fine-grained locking
   - Multiple threads can operate on different tables simultaneously

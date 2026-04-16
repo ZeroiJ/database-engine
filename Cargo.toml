@@ -4,6 +4,9 @@ version = "0.4.1"
 edition = "2024"
 default-run = "rustdb"
 
+[profile.release]
+debug = true
+
 [lib]
 name = "database_engine"
 path = "src/lib.rs"

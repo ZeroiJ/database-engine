@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
+const WAL_MAGIC: &[u8; 8] = b"RUSTDBWL";
+const WAL_VERSION: u16 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum WalEntry {
     Insert {
@@ -34,19 +37,39 @@ pub enum WalEntry {
     Checkpoint,
 }
 
+fn write_wal_header(file: &mut std::fs::File) -> Result<(), String> {
+    file.write_all(WAL_MAGIC)
+        .map_err(|e| format!("Failed to write WAL magic: {}", e))?;
+    let version_bytes = WAL_VERSION.to_le_bytes();
+    file.write_all(&version_bytes)
+        .map_err(|e| format!("Failed to write WAL version: {}", e))?;
+    file.sync_all()
+        .map_err(|e| format!("Failed to sync WAL header: {}", e))?;
+    Ok(())
+}
+
 pub fn append(path: &str, entry: &WalEntry) -> Result<(), String> {
+    let path_obj = std::path::Path::new(path);
+    let is_new = !path_obj.exists() || path_obj.metadata().map(|m| m.len()).unwrap_or(0) == 0;
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| format!("Failed to open WAL file: {}", e))?;
 
-    let encoded = bincode::serialize(entry)
-        .map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
+    if is_new {
+        write_wal_header(&mut file)?;
+    }
+
+    let encoded =
+        bincode::serialize(entry).map_err(|e| format!("Failed to serialize WAL entry: {}", e))?;
 
     let len_bytes = (encoded.len() as u32).to_le_bytes();
-    file.write_all(&len_bytes).map_err(|e| format!("Failed to write length: {}", e))?;
-    file.write_all(&encoded).map_err(|e| format!("Failed to write to WAL: {}", e))?;
+    file.write_all(&len_bytes)
+        .map_err(|e| format!("Failed to write length: {}", e))?;
+    file.write_all(&encoded)
+        .map_err(|e| format!("Failed to write to WAL: {}", e))?;
 
     file.sync_all()
         .map_err(|e| format!("Failed to sync WAL: {}", e))?;
@@ -62,13 +85,23 @@ pub fn read(path: &str) -> Result<Vec<WalEntry>, String> {
     let mut file =
         File::open(path).map_err(|e| format!("Failed to open WAL file for reading: {}", e))?;
 
-    let metadata = file.metadata().map_err(|e| format!("Failed to get WAL metadata: {}", e))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Failed to get WAL metadata: {}", e))?;
     let mut buffer = vec![0u8; metadata.len() as usize];
     file.read_exact(&mut buffer)
         .map_err(|e| format!("Failed to read WAL file: {}", e))?;
 
-    let mut entries = Vec::new();
     let mut offset = 0;
+
+    if buffer.len() >= 10 && &buffer[0..8] == WAL_MAGIC {
+        let version = u16::from_le_bytes([buffer[8], buffer[9]]);
+        eprintln!("WAL: detected format version {}", version);
+        offset = 10;
+    }
+
+    let mut entries: Vec<WalEntry> = Vec::new();
+    let mut skipped = 0;
 
     while offset < buffer.len() {
         if offset + 4 > buffer.len() {
@@ -78,14 +111,35 @@ pub fn read(path: &str) -> Result<Vec<WalEntry>, String> {
         let len = u32::from_le_bytes(len_bytes) as usize;
         offset += 4;
 
-        if offset + len > buffer.len() {
+        if len == 0 || offset + len > buffer.len() {
+            // Invalid length - skip remaining bytes
+            eprintln!(
+                "WAL: found invalid entry length {} at offset {}, skipping rest",
+                len,
+                offset - 4
+            );
             break;
         }
         let entry_bytes = &buffer[offset..offset + len];
-        let entry: WalEntry = bincode::deserialize(entry_bytes)
-            .map_err(|e| format!("Failed to deserialize WAL entry: {}", e))?;
-        entries.push(entry);
+        match bincode::deserialize(entry_bytes) {
+            Ok(entry) => {
+                entries.push(entry);
+            }
+            Err(e) => {
+                // Skip corrupted entry - continue processing
+                skipped += 1;
+                eprintln!("WAL: skipped corrupted entry at offset {}: {}", offset, e);
+            }
+        }
         offset += len;
+    }
+
+    if skipped > 0 {
+        eprintln!(
+            "WAL: recovered {} entries, skipped {} corrupted entries",
+            entries.len(),
+            skipped
+        );
     }
 
     Ok(entries)
