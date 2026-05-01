@@ -12,6 +12,14 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+fn preview_sql(input: &str, max_chars: usize) -> String {
+    let mut out: String = input.chars().take(max_chars).collect();
+    if input.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
 pub fn start(db_path: String, port: u16) {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|_| {
         eprintln!("{}", format!("✗ Port {} is already in use", port).red());
@@ -201,6 +209,14 @@ fn handle_client(
             continue;
         }
 
+        let sql_preview = preview_sql(input.trim(), 200);
+        eprintln!(
+            "[SERVER] Raw SQL from {} (len={}): {}",
+            peer,
+            input.trim().chars().count(),
+            sql_preview
+        );
+
         if input == ".help" {
             let response = "REPL Commands:\n  .tables      - List all tables\n  .schema <t>  - Show table schema\n  .stats       - Show database statistics\n  .help        - Show this help message\n  .exit        - Disconnect\n  .quit        - Shutdown server\n--END--\n";
             stream.write_all(response.as_bytes()).ok();
@@ -208,12 +224,21 @@ fn handle_client(
         }
 
         let tokens = lexer::tokenize(input);
+        let tokens_for_log = tokens.clone();
         let stmt = match parser::parse(tokens) {
             Ok(s) => s,
             Err(e) => {
-                stream
-                    .write_all(format!("✗ Parse error: {}\n--END--\n", e).as_bytes())
-                    .ok();
+                let response = format!("✗ Parse error: {}\n--END--\n", e);
+                eprintln!(
+                    "[SERVER] Parse error from {}. sql='{}' error='{}' tokens={:?}",
+                    peer, sql_preview, e, tokens_for_log
+                );
+                eprintln!(
+                    "[SERVER] Sending response to {}: {}",
+                    peer,
+                    response.trim_end()
+                );
+                stream.write_all(response.as_bytes()).ok();
                 continue;
             }
         };
@@ -271,6 +296,12 @@ fn handle_client(
             None
         };
 
+        let create_table_name = if let Statement::CreateTable { table, .. } = &stmt {
+            Some(table.clone())
+        } else {
+            None
+        };
+
         let (result, should_save) = if !is_mutation {
             let result = execute_read(&db, &stmt);
             (result, false)
@@ -286,17 +317,43 @@ fn handle_client(
 
         match result {
             Ok(res) => {
+                if let Some(table) = &create_table_name {
+                    eprintln!(
+                        "[SERVER] CREATE TABLE succeeded for '{}' from {}",
+                        table, peer
+                    );
+                }
+                eprintln!("[SERVER] Success: executed statement, result: {}", res);
+                let response = format!("{}\n--END--\n", res);
+                eprintln!(
+                    "[SERVER] Sending response to {}: {}",
+                    peer,
+                    response.trim_end()
+                );
                 stream.write_all(res.as_bytes()).ok();
                 stream.write_all(b"\n--END--\n").ok();
+                stream.flush().ok();
 
                 if should_save {
                     wal::append(&wal_path, &WalEntry::Checkpoint).ok();
                 }
             }
             Err(e) => {
-                stream
-                    .write_all(format!("✗ {}\n--END--\n", e).as_bytes())
-                    .ok();
+                if let Some(table) = &create_table_name {
+                    eprintln!(
+                        "[SERVER] CREATE TABLE failed for '{}' from {}: {}",
+                        table, peer, e
+                    );
+                }
+                eprintln!("[SERVER] Execution error: {}", e);
+                let response = format!("✗ {}\n--END--\n", e);
+                eprintln!(
+                    "[SERVER] Sending response to {}: {}",
+                    peer,
+                    response.trim_end()
+                );
+                stream.write_all(response.as_bytes()).ok();
+                stream.flush().ok();
             }
         }
     }

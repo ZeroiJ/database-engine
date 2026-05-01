@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 const SERVER_ADDR: &str = "127.0.0.1:7878";
 const NUM_THREADS: usize = 10;
 const INSERTS_PER_THREAD: usize = 5000;
-const TIMEOUT_SECS: u64 = 5;
+const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 fn read_until_end(reader: &mut BufReader<TcpStream>) -> bool {
     loop {
@@ -25,28 +25,85 @@ fn read_until_end(reader: &mut BufReader<TcpStream>) -> bool {
     }
 }
 
+fn parse_timeout_secs() -> u64 {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--timeout" => {
+                if let Some(v) = args.get(i + 1) {
+                    if let Ok(parsed) = v.parse::<u64>() {
+                        return parsed;
+                    }
+                }
+                eprintln!(
+                    "Invalid --timeout value. Using default {}s.",
+                    DEFAULT_TIMEOUT_SECS
+                );
+                return DEFAULT_TIMEOUT_SECS;
+            }
+            "--help" | "-h" => {
+                println!("rustdb-hammer options:");
+                println!("  --timeout <seconds>   Global timeout (0 = no timeout)");
+                println!("                        Default: {}", DEFAULT_TIMEOUT_SECS);
+                std::process::exit(0);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    DEFAULT_TIMEOUT_SECS
+}
+
+fn progress_bar(done: usize, total: usize, width: usize) -> String {
+    if total == 0 || width == 0 {
+        return String::new();
+    }
+    let ratio = done as f64 / total as f64;
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!(
+        "[{}{}]",
+        "=".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    )
+}
+
 fn main() {
+    let timeout_secs = parse_timeout_secs();
+    let total_expected = NUM_THREADS * INSERTS_PER_THREAD;
+
     println!("Starting rustdb Concurrency Hammer (Phase 10)...");
     println!("Target: {}", SERVER_ADDR);
     println!("Threads: {}", NUM_THREADS);
     println!("Inserts per thread: {}", INSERTS_PER_THREAD);
-    println!("Timeout: {} seconds", TIMEOUT_SECS);
+    if timeout_secs == 0 {
+        println!("Timeout: disabled (runs until completion)");
+    } else {
+        println!("Timeout: {} seconds", timeout_secs);
+    }
     println!("Mode: Per-table locking (each thread hits its own table)");
     println!();
 
     let success_count = Arc::new(AtomicUsize::new(0));
+    let thread_progress: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..NUM_THREADS).map(|_| AtomicUsize::new(0)).collect());
     let mut handles = vec![];
     let start_time = Instant::now();
-    let deadline = start_time + Duration::from_secs(TIMEOUT_SECS);
+    let deadline = if timeout_secs == 0 {
+        None
+    } else {
+        Some(start_time + Duration::from_secs(timeout_secs))
+    };
 
     println!(
-        "[{}] Starting {} threads...",
-        start_time.elapsed().as_secs(),
+        "[{:.1}s] Starting {} threads...",
+        start_time.elapsed().as_secs_f64(),
         NUM_THREADS
     );
 
     for thread_id in 0..NUM_THREADS {
         let counter = Arc::clone(&success_count);
+        let progress = Arc::clone(&thread_progress);
         let tid = thread_id;
 
         let handle = thread::spawn(move || {
@@ -99,64 +156,78 @@ fn main() {
                 }
                 if read_until_end(&mut reader) {
                     local_success += 1;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    progress[tid].store(local_success, Ordering::SeqCst);
                 } else {
                     break;
                 }
             }
-            counter.fetch_add(local_success, Ordering::SeqCst);
+            progress[tid].store(local_success, Ordering::SeqCst);
         });
         handles.push(handle);
     }
 
-    let mut last_progress = Instant::now();
-    let mut done = false;
-    while !done {
+    let mut last_report = Instant::now();
+    let mut last_detailed_report = Instant::now();
+    let mut timed_out = false;
+    loop {
         thread::sleep(Duration::from_millis(100));
         let now = Instant::now();
-        if now >= deadline {
-            done = true;
-            println!();
-            println!(
-                "[{}] TIMEOUT reached after {}s - {} threads may still be running",
-                now.elapsed().as_secs(),
-                TIMEOUT_SECS,
-                NUM_THREADS
-            );
-            break;
-        }
+        let elapsed = now.duration_since(start_time).as_secs_f64();
 
-        let current = success_count.load(Ordering::SeqCst);
-        let elapsed = now.elapsed().as_secs_f64();
-        if now.duration_since(last_progress).as_secs() >= 1 {
-            let tps = (current as f64) / elapsed;
-            println!(
-                "[{}] {} inserts, {:.2} TPS",
-                now.elapsed().as_secs(),
-                current,
-                tps
-            );
-            last_progress = now;
-        }
-
-        let mut all_done = true;
-        for handle in &handles {
-            if handle.is_finished() {
-                continue;
-            } else {
-                all_done = false;
+        if let Some(d) = deadline {
+            if now >= d {
+                timed_out = true;
+                println!();
+                println!(
+                    "[{:.1}s] TIMEOUT reached after {}s",
+                    elapsed, timeout_secs
+                );
                 break;
             }
         }
+
+        let current = success_count.load(Ordering::SeqCst);
+        if now.duration_since(last_report).as_secs_f64() >= 1.0 {
+            let tps = if elapsed > 0.0 {
+                current as f64 / elapsed
+            } else {
+                0.0
+            };
+            let pct = if total_expected > 0 {
+                (current as f64 / total_expected as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "[{:.1}s] Running TPS: {:.2} | Progress: {}/{} ({:.2}%) {}",
+                elapsed,
+                tps,
+                current,
+                total_expected,
+                pct,
+                progress_bar(current, total_expected, 24)
+            );
+            last_report = now;
+        }
+
+        if now.duration_since(last_detailed_report).as_secs_f64() >= 5.0 {
+            println!("Thread progress snapshot:");
+            for tid in 0..NUM_THREADS {
+                let done = thread_progress[tid].load(Ordering::SeqCst);
+                let pct = (done as f64 / INSERTS_PER_THREAD as f64) * 100.0;
+                println!("  Thread {}: {}/{} ({:.2}%)", tid, done, INSERTS_PER_THREAD, pct);
+            }
+            last_detailed_report = now;
+        }
+
+        let all_done = handles.iter().all(|h| h.is_finished());
         if all_done {
-            done = true;
+            break;
         }
     }
 
-    if !done {
-        for handle in handles {
-            let _ = handle.join();
-        }
-    } else {
+    if !timed_out {
         for handle in handles {
             let _ = handle.join();
         }
@@ -173,12 +244,22 @@ fn main() {
     println!();
     println!("=== Stress Test Complete ===");
     println!("Total successful inserts: {}", total_inserts);
-    println!("Expected total: {}", NUM_THREADS * INSERTS_PER_THREAD);
+    println!("Expected total: {}", total_expected);
     println!("Time taken: {:.2?}", duration);
     println!("Throughput: {:.2} Transactions/sec", tps);
 
-    if total_inserts < NUM_THREADS * INSERTS_PER_THREAD {
-        let lost = NUM_THREADS * INSERTS_PER_THREAD - total_inserts;
+    if timed_out {
+        println!("Status: timed out before completion");
+    } else {
+        println!("Status: completed");
+    }
+
+    if total_inserts < total_expected {
+        let lost = total_expected - total_inserts;
         println!("WARNING: {} inserts may have failed or timed out", lost);
+    }
+
+    if timed_out {
+        std::process::exit(124);
     }
 }
