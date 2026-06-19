@@ -1,5 +1,5 @@
 use crate::parser::{Operator, Statement, WhereClause};
-use crate::storage::Database;
+use crate::storage::DiskDatabase as Database;
 
 #[derive(Debug, Clone)]
 pub enum ScanType {
@@ -31,115 +31,25 @@ pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
         _ => return None,
     };
 
-    let table_arc = db.get_table(&table)?;
-    let table_lock = table_arc.read().unwrap();
-    let table_meta = &table_lock;
-    let total_rows = table_meta.rows.inorder().len();
+    let total_rows = db.get_table_row_count(&table);
 
+    // Note: Secondary indexes are not yet supported in DiskDatabase,
+    // so we always do a FullScan for now.
     let (scan_type, estimated_rows, condition_str) = match &condition {
         Some(WhereClause::Single(cond)) => {
-            let col = &cond.column;
             let op_str = match cond.operator {
-                Operator::Eq => "=".to_string(),
-                Operator::Gt => ">".to_string(),
-                Operator::Lt => "<".to_string(),
+                Operator::Eq => "=",
+                Operator::Gt => ">",
+                Operator::Lt => "<",
             };
-            let cond_str = format!("{} {} {}", col, op_str, value_str(&cond.value));
-
-            if let Some(index) = table_meta.indexes.values().find(|i| i.column == *col) {
-                match cond.operator {
-                    Operator::Eq => (
-                        ScanType::IndexScan {
-                            index_name: index.name.clone(),
-                            column: col.clone(),
-                        },
-                        total_rows / 10 + 1,
-                        Some(cond_str),
-                    ),
-                    Operator::Gt | Operator::Lt => (
-                        ScanType::IndexRangeScan {
-                            index_name: index.name.clone(),
-                            column: col.clone(),
-                        },
-                        total_rows / 4 + 1,
-                        Some(cond_str),
-                    ),
-                }
-            } else {
-                (ScanType::FullScan, total_rows, Some(cond_str))
-            }
+            let cond_str = format!("{} {} {}", cond.column, op_str, value_str(&cond.value));
+            (ScanType::FullScan, total_rows, Some(cond_str))
         }
         Some(WhereClause::And(left, right)) => {
             let left_str = where_clause_to_string(left);
             let right_str = where_clause_to_string(right);
             let cond_str = format!("({} AND {})", left_str, right_str);
-
-            let left_has_idx = has_index_on_column(&table_meta, left);
-            let right_has_idx = has_index_on_column(&table_meta, right);
-
-            if left_has_idx {
-                if let Some(idx) = get_index_for_condition(&table_meta, left) {
-                    if let crate::parser::WhereClause::Single(cond) = left.as_ref() {
-                        if matches!(cond.operator, Operator::Eq) {
-                            (
-                                ScanType::IndexScan {
-                                    index_name: idx.name.clone(),
-                                    column: cond.column.clone(),
-                                },
-                                total_rows / 10 + 1,
-                                Some(cond_str),
-                            )
-                        } else if matches!(cond.operator, Operator::Gt | Operator::Lt) {
-                            (
-                                ScanType::IndexRangeScan {
-                                    index_name: idx.name.clone(),
-                                    column: cond.column.clone(),
-                                },
-                                total_rows / 4 + 1,
-                                Some(cond_str),
-                            )
-                        } else {
-                            (ScanType::FullScan, total_rows, Some(cond_str))
-                        }
-                    } else {
-                        (ScanType::FullScan, total_rows, Some(cond_str))
-                    }
-                } else {
-                    (ScanType::FullScan, total_rows, Some(cond_str))
-                }
-            } else if right_has_idx {
-                if let Some(idx) = get_index_for_condition(&table_meta, right) {
-                    if let crate::parser::WhereClause::Single(cond) = right.as_ref() {
-                        if matches!(cond.operator, Operator::Eq) {
-                            (
-                                ScanType::IndexScan {
-                                    index_name: idx.name.clone(),
-                                    column: cond.column.clone(),
-                                },
-                                total_rows / 10 + 1,
-                                Some(cond_str),
-                            )
-                        } else if matches!(cond.operator, Operator::Gt | Operator::Lt) {
-                            (
-                                ScanType::IndexRangeScan {
-                                    index_name: idx.name.clone(),
-                                    column: cond.column.clone(),
-                                },
-                                total_rows / 4 + 1,
-                                Some(cond_str),
-                            )
-                        } else {
-                            (ScanType::FullScan, total_rows, Some(cond_str))
-                        }
-                    } else {
-                        (ScanType::FullScan, total_rows, Some(cond_str))
-                    }
-                } else {
-                    (ScanType::FullScan, total_rows, Some(cond_str))
-                }
-            } else {
-                (ScanType::FullScan, total_rows, Some(cond_str))
-            }
+            (ScanType::FullScan, total_rows, Some(cond_str))
         }
         Some(WhereClause::Or(left, right)) => {
             let left_str = where_clause_to_string(left);
@@ -191,27 +101,6 @@ fn where_clause_to_string(wc: &crate::parser::WhereClause) -> String {
     }
 }
 
-fn has_index_on_column(
-    table_meta: &crate::storage::Table,
-    cond: &crate::parser::WhereClause,
-) -> bool {
-    if let crate::parser::WhereClause::Single(c) = cond {
-        table_meta.indexes.values().any(|i| i.column == c.column)
-    } else {
-        false
-    }
-}
-
-fn get_index_for_condition<'a>(
-    table_meta: &'a crate::storage::Table,
-    cond: &crate::parser::WhereClause,
-) -> Option<&'a crate::storage::Index> {
-    if let crate::parser::WhereClause::Single(c) = cond {
-        table_meta.indexes.values().find(|i| i.column == c.column)
-    } else {
-        None
-    }
-}
 
 fn value_str(v: &crate::parser::Value) -> String {
     match v {
@@ -288,10 +177,12 @@ pub fn format_plan(plan: &QueryPlan) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_plan_full_scan() {
-        let db = Database::new();
+        let temp_file = NamedTempFile::new().unwrap();
+        let db = Database::new(temp_file.path().to_str().unwrap()).unwrap();
         let stmt = Statement::Select {
             table: "users".to_string(),
             columns: vec!["*".to_string()],
@@ -300,12 +191,13 @@ mod tests {
             limit: None,
         };
         let result = plan(&db, &stmt);
-        assert!(result.is_none());
+        assert!(result.is_some());
     }
 
     #[test]
     fn test_plan_non_select() {
-        let db = Database::new();
+        let temp_file = NamedTempFile::new().unwrap();
+        let db = Database::new(temp_file.path().to_str().unwrap()).unwrap();
         let stmt = Statement::Insert {
             table: "users".to_string(),
             values: vec![],

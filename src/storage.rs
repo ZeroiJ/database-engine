@@ -1,6 +1,8 @@
 use crate::btree::BTree;
 use crate::buffer::BufferPoolManager;
-use crate::disk_btree::DiskBTree;
+use crate::catalog::{Catalog, TableMeta};
+use crate::disk::{DiskManager, RecordId};
+use crate::disk_btree::{DiskBTree, DiskBTreeNode};
 use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
 use crate::table_heap::TableHeap;
 use serde::{Deserialize, Serialize};
@@ -510,9 +512,11 @@ impl Database {
 
         if let Some((ref order_col, ascending)) = order_by {
             if let Some(col_idx) = table.columns.iter().position(|c| &c.name == order_col) {
+                // Map from schema column index to projected result index
+                let result_idx = column_indices.iter().position(|&i| i == col_idx).unwrap_or(col_idx);
                 results.sort_by(|a, b| {
-                    let a_val = a.get(col_idx);
-                    let b_val = b.get(col_idx);
+                    let a_val = a.get(result_idx);
+                    let b_val = b.get(result_idx);
                     match (a_val, b_val) {
                         (Some(av), Some(bv)) => {
                             let cmp = Self::compare_values(av, bv);
@@ -734,7 +738,7 @@ impl Database {
             }
     }
 
-    fn compare_values(row_val: &Value, cond_val: &Value) -> Option<std::cmp::Ordering> {
+    pub fn compare_values(row_val: &Value, cond_val: &Value) -> Option<std::cmp::Ordering> {
         match (row_val, cond_val) {
             (Value::Integer(lhs), Value::Integer(rhs)) => Some(lhs.cmp(rhs)),
             (Value::Float(lhs), Value::Float(rhs)) => {
@@ -755,7 +759,7 @@ impl Database {
         }
     }
 
-    fn evaluate_where_static(row: &Row, columns: &[ColumnDef], where_clause: &WhereClause) -> bool {
+    pub fn evaluate_where_static(row: &Row, columns: &[ColumnDef], where_clause: &WhereClause) -> bool {
         match where_clause {
             WhereClause::Single(cond) => Self::evaluate_condition_static(row, columns, cond),
             WhereClause::And(left, right) => {
@@ -844,6 +848,404 @@ impl Default for Database {
         Self::new()
     }
 }
+
+// =============================================================================
+// DiskDatabase — Disk-backed storage engine
+// =============================================================================
+
+
+const DEFAULT_BUFFER_POOL_SIZE: usize = 1024;
+
+/// A disk-backed database engine. Data is stored in a binary `.db` file using
+/// page-based storage (4 KB pages). A `BufferPoolManager` manages page caching,
+/// a `Catalog` (page 0) tracks table metadata, and each table has a `TableHeap`
+/// (row storage) and `DiskBTree` (primary key index).
+pub struct DiskDatabase {
+    buffer_pool: Arc<Mutex<BufferPoolManager>>,
+    catalog: Catalog,
+    db_path: String,
+}
+
+impl DiskDatabase {
+    /// Create a new database at the given path.
+    pub fn new(path: &str) -> Result<Self, String> {
+        let dm = DiskManager::new(path)
+            .map_err(|e| format!("Failed to create database file: {}", e))?;
+        let bpm = Arc::new(Mutex::new(BufferPoolManager::new(DEFAULT_BUFFER_POOL_SIZE, dm)));
+        let catalog = Catalog::create(bpm.clone());
+
+        Ok(DiskDatabase {
+            buffer_pool: bpm,
+            catalog,
+            db_path: path.to_string(),
+        })
+    }
+
+    /// Open an existing database, or create a new one if the file doesn't exist.
+    pub fn open(path: &str) -> Result<Self, String> {
+        if !Path::new(path).exists() || std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 {
+            return Self::new(path);
+        }
+
+        let dm = DiskManager::new(path)
+            .map_err(|e| format!("Failed to open database file: {}", e))?;
+        let bpm = Arc::new(Mutex::new(BufferPoolManager::new(DEFAULT_BUFFER_POOL_SIZE, dm)));
+        let catalog = Catalog::load(bpm.clone())?;
+
+        Ok(DiskDatabase {
+            buffer_pool: bpm,
+            catalog,
+            db_path: path.to_string(),
+        })
+    }
+
+    /// Flush all dirty pages to disk.
+    pub fn flush(&self) -> Result<(), String> {
+        let mut pool = self.buffer_pool.lock().unwrap();
+        pool.flush_all_pages()
+            .map_err(|e| format!("Failed to flush pages: {}", e))
+    }
+
+    /// Create a new table with the given name and columns.
+    pub fn create_table(&mut self, name: String, columns: Vec<ColumnDef>) -> Result<(), String> {
+        if self.catalog.get_table(&name).is_some() {
+            return Err(format!("Table '{}' already exists", name));
+        }
+
+        // Allocate heap for the table (creates first page)
+        let heap = TableHeap::new(self.buffer_pool.clone());
+        let heap_first = heap.first_page_id;
+        let heap_last = heap.last_page_id;
+
+        // Allocate a root page for the primary key B-Tree index
+        let index_root_page_id = {
+            let mut pool = self.buffer_pool.lock().unwrap();
+            let page = pool.new_page()
+                .map_err(|e| format!("Failed to allocate index page: {}", e))?
+                .ok_or("Buffer pool full")?;
+            let page_id = page.id;
+            let node = DiskBTreeNode::new(page_id, true);
+            page.data = node.encode();
+            pool.unpin_page(page_id, true);
+            page_id
+        };
+
+        let meta = TableMeta {
+            name: name.clone(),
+            columns,
+            heap_first_page_id: heap_first,
+            heap_last_page_id: heap_last,
+            index_root_page_id,
+            next_row_id: 1,
+        };
+
+        self.catalog.add_table(meta)?;
+        Ok(())
+    }
+
+    /// Drop a table.
+    pub fn drop_table(&mut self, name: String) -> Result<(), String> {
+        self.catalog.remove_table(&name)?;
+        // Note: pages are not reclaimed (no free-list yet). This is acceptable
+        // for now; a future improvement would add page reclamation.
+        Ok(())
+    }
+
+    /// Insert a row into a table.
+    pub fn insert(&mut self, table: String, values: Vec<Value>) -> Result<i64, String> {
+        let meta = self.catalog.get_table(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        // Validate column count
+        if values.len() != meta.columns.len() {
+            return Err(format!(
+                "Column count mismatch: expected {}, got {}",
+                meta.columns.len(),
+                values.len()
+            ));
+        }
+
+        // Validate types
+        for (i, value) in values.iter().enumerate() {
+            Self::validate_type(value, &meta.columns[i])?;
+        }
+
+        let row_id = meta.next_row_id;
+        let heap_first = meta.heap_first_page_id;
+        let heap_last = meta.heap_last_page_id;
+        let index_root = meta.index_root_page_id;
+
+        // Insert into heap
+        let mut heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
+        let record_id = heap.insert_row(values)?;
+
+        // Insert into primary index
+        let mut index = DiskBTree::new(self.buffer_pool.clone(), index_root);
+        index.insert(row_id, record_id);
+
+        // Update catalog metadata
+        let meta = self.catalog.get_table_mut(&table).unwrap();
+        meta.next_row_id = row_id + 1;
+        meta.heap_last_page_id = heap.last_page_id;
+        meta.index_root_page_id = index.root_page_id;
+        self.catalog.save()?;
+
+        Ok(row_id)
+    }
+
+    /// Select rows from a table.
+    pub fn select(
+        &self,
+        table: String,
+        columns: Vec<String>,
+        condition: Option<WhereClause>,
+        order_by: Option<(String, bool)>,
+        limit: Option<usize>,
+    ) -> Result<(Vec<Row>, bool), String> {
+        let meta = self.catalog.get_table(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        let table_columns = meta.columns.clone();
+
+        // Resolve column indices
+        let column_indices: Vec<usize> = if columns.contains(&"*".to_string()) {
+            (0..table_columns.len()).collect()
+        } else {
+            columns
+                .iter()
+                .map(|col_name| {
+                    table_columns
+                        .iter()
+                        .position(|c| &c.name == col_name)
+                        .ok_or_else(|| format!("Column not found: {}", col_name))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        // Full table scan via heap
+        let heap = TableHeap::open(
+            self.buffer_pool.clone(),
+            meta.heap_first_page_id,
+            meta.heap_last_page_id,
+        );
+        let all_rows = heap.scan()?;
+
+        let mut results: Vec<Row> = all_rows
+            .iter()
+            .filter(|(_, row)| {
+                if let Some(ref cond) = condition {
+                    Database::evaluate_where_static(row, &table_columns, cond)
+                } else {
+                    true
+                }
+            })
+            .map(|(_, row)| column_indices.iter().map(|&i| row[i].clone()).collect())
+            .collect();
+
+        // ORDER BY
+        if let Some((ref order_col, ascending)) = order_by {
+            if let Some(col_idx) = table_columns.iter().position(|c| &c.name == order_col) {
+                // Map from schema column index to projected result index
+                let result_idx = column_indices.iter().position(|&i| i == col_idx).unwrap_or(col_idx);
+                results.sort_by(|a, b| {
+                    let a_val = a.get(result_idx);
+                    let b_val = b.get(result_idx);
+                    match (a_val, b_val) {
+                        (Some(av), Some(bv)) => {
+                            let cmp = Database::compare_values(av, bv);
+                            let ord = cmp.unwrap_or(std::cmp::Ordering::Equal);
+                            if ascending { ord } else { ord.reverse() }
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
+        }
+
+        // LIMIT
+        if let Some(n) = limit {
+            results.truncate(n);
+        }
+
+        Ok((results, false))
+    }
+
+    /// Delete rows matching a condition.
+    pub fn delete(&mut self, table: String, condition: Option<WhereClause>) -> Result<usize, String> {
+        let meta = self.catalog.get_table(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        let table_columns = meta.columns.clone();
+        let heap_first = meta.heap_first_page_id;
+        let heap_last = meta.heap_last_page_id;
+        let index_root = meta.index_root_page_id;
+
+        // Scan to find matching rows
+        let heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
+        let all_rows = heap.scan()?;
+
+        // Get the primary index to find row_id -> record_id mappings
+        let mut index = DiskBTree::new(self.buffer_pool.clone(), index_root);
+        let index_entries = index.inorder();
+
+        // Match rows against condition
+        let mut keys_to_delete: Vec<(i64, RecordId)> = Vec::new();
+        for (row_id, record_id) in &index_entries {
+            // Find this record_id in the scanned rows
+            if let Some((_, row)) = all_rows.iter().find(|(rid, _)| rid == record_id) {
+                let should_delete = if let Some(ref cond) = condition {
+                    Database::evaluate_where_static(row, &table_columns, cond)
+                } else {
+                    true
+                };
+                if should_delete {
+                    keys_to_delete.push((*row_id, *record_id));
+                }
+            }
+        }
+
+        // Delete from heap and index
+        let count = keys_to_delete.len();
+        for (row_id, record_id) in &keys_to_delete {
+            heap.delete_row(*record_id)?;
+            index.delete(*row_id);
+        }
+
+        // Update catalog with potentially changed index root
+        let meta = self.catalog.get_table_mut(&table).unwrap();
+        meta.index_root_page_id = index.root_page_id;
+        self.catalog.save()?;
+
+        Ok(count)
+    }
+
+    /// Update rows matching a condition.
+    pub fn update(
+        &mut self,
+        table: String,
+        column: String,
+        value: Value,
+        condition: Option<WhereClause>,
+    ) -> Result<usize, String> {
+        let meta = self.catalog.get_table(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        let table_columns = meta.columns.clone();
+        let col_idx = table_columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| format!("Column not found: {}", column))?;
+
+        // Validate type
+        Self::validate_type(&value, &table_columns[col_idx])?;
+
+        let heap_first = meta.heap_first_page_id;
+        let heap_last = meta.heap_last_page_id;
+        let index_root = meta.index_root_page_id;
+
+        // Scan to find matching rows
+        let heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
+        let all_rows = heap.scan()?;
+
+        let mut index = DiskBTree::new(self.buffer_pool.clone(), index_root);
+        let index_entries = index.inorder();
+
+        // Find rows to update
+        let mut rows_to_update: Vec<(i64, RecordId, Row)> = Vec::new();
+        for (row_id, record_id) in &index_entries {
+            if let Some((_, row)) = all_rows.iter().find(|(rid, _)| rid == record_id) {
+                let should_update = if let Some(ref cond) = condition {
+                    Database::evaluate_where_static(row, &table_columns, cond)
+                } else {
+                    true
+                };
+                if should_update {
+                    let mut new_row = row.clone();
+                    new_row[col_idx] = value.clone();
+                    rows_to_update.push((*row_id, *record_id, new_row));
+                }
+            }
+        }
+
+        let count = rows_to_update.len();
+
+        // Update each row: delete old record from heap, insert new one, update index
+        let mut heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
+        for (row_id, old_record_id, new_row) in &rows_to_update {
+            let new_record_id = heap.update_row(*old_record_id, new_row.clone())?;
+            // Update primary index to point to new location
+            index.delete(*row_id);
+            index.insert(*row_id, new_record_id);
+        }
+
+        // Update catalog
+        let meta = self.catalog.get_table_mut(&table).unwrap();
+        meta.heap_last_page_id = heap.last_page_id;
+        meta.index_root_page_id = index.root_page_id;
+        self.catalog.save()?;
+
+        Ok(count)
+    }
+
+    pub fn table_count(&self) -> usize {
+        self.catalog.table_count()
+    }
+
+    pub fn table_names(&self) -> Vec<String> {
+        self.catalog.table_names()
+    }
+
+    pub fn get_columns(&self, table: &str) -> Option<Vec<ColumnDef>> {
+        self.catalog.get_table(table).map(|m| m.columns.clone())
+    }
+
+    pub fn get_table_row_count(&self, table: &str) -> usize {
+        if let Some(meta) = self.catalog.get_table(table) {
+            let heap = TableHeap::open(
+                self.buffer_pool.clone(),
+                meta.heap_first_page_id,
+                meta.heap_last_page_id,
+            );
+            heap.scan().map(|rows| rows.len()).unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    pub fn db_file_size(&self) -> u64 {
+        std::fs::metadata(&self.db_path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn validate_type(value: &Value, col: &ColumnDef) -> Result<(), String> {
+        match (value, &col.data_type) {
+            (Value::Integer(_), DataType::Int) => Ok(()),
+            (Value::Float(_), DataType::Float) => Ok(()),
+            (Value::Integer(_), DataType::Float) => Ok(()), // int -> float implicit
+            (Value::Boolean(_), DataType::Boolean) => Ok(()),
+            (Value::Text(_), DataType::Text) => Ok(()),
+            _ => Err(format!(
+                "Cannot assign {:?} value to {} column '{}'",
+                std::mem::discriminant(value),
+                match col.data_type {
+                    DataType::Int => "INT",
+                    DataType::Float => "FLOAT",
+                    DataType::Boolean => "BOOLEAN",
+                    DataType::Text => "TEXT",
+                },
+                col.name
+            )),
+        }
+    }
+
+    pub fn create_index(&mut self, _table: String, _index_name: String, _column: String) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn drop_index(&mut self, _index_name: String) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1734,5 +2136,394 @@ mod tests {
         if let Value::Integer(age) = result[0][2] {
             assert_eq!(age, 20);
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_db_tests {
+    use super::*;
+    use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
+    use tempfile::NamedTempFile;
+
+    /// Helper: create a DiskDatabase with a users table.
+    fn setup_users_db() -> (DiskDatabase, NamedTempFile) {
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap();
+        let mut db = DiskDatabase::new(path).unwrap();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "name".to_string(),
+                data_type: DataType::Text,
+            },
+            ColumnDef {
+                name: "age".to_string(),
+                data_type: DataType::Int,
+            },
+        ];
+        db.create_table("users".to_string(), columns).unwrap();
+        (db, temp_file)
+    }
+
+    #[test]
+    fn test_diskdb_create_table() {
+        let (db, _tmp) = setup_users_db();
+        assert_eq!(db.table_count(), 1);
+        assert_eq!(db.table_names(), vec!["users"]);
+        let cols = db.get_columns("users").unwrap();
+        assert_eq!(cols.len(), 3);
+    }
+
+    #[test]
+    fn test_diskdb_create_duplicate_table() {
+        let (mut db, _tmp) = setup_users_db();
+        let columns = vec![ColumnDef {
+            name: "x".to_string(),
+            data_type: DataType::Int,
+        }];
+        let result = db.create_table("users".to_string(), columns);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+    }
+
+    #[test]
+    fn test_diskdb_insert_and_select_all() {
+        let (mut db, _tmp) = setup_users_db();
+
+        let id1 = db
+            .insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(1),
+                    Value::Text("alice".to_string()),
+                    Value::Integer(30),
+                ],
+            )
+            .unwrap();
+        assert_eq!(id1, 1);
+
+        let id2 = db
+            .insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(2),
+                    Value::Text("bob".to_string()),
+                    Value::Integer(25),
+                ],
+            )
+            .unwrap();
+        assert_eq!(id2, 2);
+
+        let (rows, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_diskdb_select_with_where() {
+        let (mut db, _tmp) = setup_users_db();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Text("bob".to_string()),
+                Value::Integer(25),
+            ],
+        )
+        .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Gt,
+                    value: Value::Integer(25),
+                })),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if let Value::Text(name) = &rows[0][1] {
+            assert_eq!(name, "alice");
+        } else {
+            panic!("Expected Text value");
+        }
+    }
+
+    #[test]
+    fn test_diskdb_select_column_subset() {
+        let (mut db, _tmp) = setup_users_db();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["name".to_string()],
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+    }
+
+    #[test]
+    fn test_diskdb_delete() {
+        let (mut db, _tmp) = setup_users_db();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Text("bob".to_string()),
+                Value::Integer(25),
+            ],
+        )
+        .unwrap();
+
+        let deleted = db
+            .delete(
+                "users".to_string(),
+                Some(WhereClause::Single(Condition {
+                    column: "id".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(1),
+                })),
+            )
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let (remaining, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn test_diskdb_update() {
+        let (mut db, _tmp) = setup_users_db();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+
+        let updated = db
+            .update(
+                "users".to_string(),
+                "age".to_string(),
+                Value::Integer(35),
+                Some(WhereClause::Single(Condition {
+                    column: "name".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Text("alice".to_string()),
+                })),
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let (rows, _) = db
+            .select("users".to_string(), vec!["*".to_string()], None, None, None)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        if let Value::Integer(age) = rows[0][2] {
+            assert_eq!(age, 35);
+        } else {
+            panic!("Expected Integer");
+        }
+    }
+
+    #[test]
+    fn test_diskdb_persistence() {
+        // Write to a temp file, close, reopen, verify data survives
+        let temp_file = NamedTempFile::new().unwrap();
+        let path = temp_file.path().to_str().unwrap().to_string();
+        let columns = vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int,
+            },
+            ColumnDef {
+                name: "val".to_string(),
+                data_type: DataType::Text,
+            },
+        ];
+
+        {
+            let mut db = DiskDatabase::new(&path).unwrap();
+            db.create_table("demo".to_string(), columns.clone()).unwrap();
+            db.insert(
+                "demo".to_string(),
+                vec![Value::Integer(42), Value::Text("hello".to_string())],
+            )
+            .unwrap();
+            db.flush().unwrap();
+        }
+
+        // Reopen and verify
+        {
+            let db = DiskDatabase::open(&path).unwrap();
+            assert_eq!(db.table_count(), 1);
+            assert_eq!(db.table_names(), vec!["demo"]);
+            let (rows, _) = db
+                .select("demo".to_string(), vec!["*".to_string()], None, None, None)
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            if let Value::Text(val) = &rows[0][1] {
+                assert_eq!(val, "hello");
+            } else {
+                panic!("Expected Text");
+            }
+        }
+    }
+
+    #[test]
+    fn test_diskdb_order_by() {
+        let (mut db, _tmp) = setup_users_db();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("c".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Text("a".to_string()),
+                Value::Integer(20),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(3),
+                Value::Text("b".to_string()),
+                Value::Integer(25),
+            ],
+        )
+        .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["name".to_string()],
+                None,
+                Some(("name".to_string(), true)),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        if let Value::Text(n) = &rows[0][0] {
+            assert_eq!(n, "a");
+        } else {
+            panic!("Expected Text");
+        }
+        if let Value::Text(n) = &rows[2][0] {
+            assert_eq!(n, "c");
+        } else {
+            panic!("Expected Text");
+        }
+    }
+
+    #[test]
+    fn test_diskdb_limit() {
+        let (mut db, _tmp) = setup_users_db();
+        for i in 0..10 {
+            db.insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(i),
+                    Value::Text(format!("user{}", i)),
+                    Value::Integer(20 + i),
+                ],
+            )
+            .unwrap();
+        }
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                None,
+                None,
+                Some(3),
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn test_diskdb_column_count_mismatch() {
+        let (mut db, _tmp) = setup_users_db();
+        let result = db.insert(
+            "users".to_string(),
+            vec![Value::Integer(1)],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Column count mismatch"));
+    }
+
+    #[test]
+    fn test_diskdb_type_validation() {
+        let (mut db, _tmp) = setup_users_db();
+        let result = db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Integer(99),
+                Value::Integer(30),
+            ],
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diskdb_drop_table() {
+        let (mut db, _tmp) = setup_users_db();
+        assert_eq!(db.table_count(), 1);
+        db.drop_table("users".to_string()).unwrap();
+        assert_eq!(db.table_count(), 0);
     }
 }

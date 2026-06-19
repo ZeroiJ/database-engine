@@ -1,5 +1,6 @@
 pub mod btree;
 pub mod buffer;
+pub mod catalog;
 pub mod disk;
 pub mod disk_btree;
 pub mod lexer;
@@ -15,18 +16,20 @@ pub use buffer::BufferPoolManager;
 pub use disk::{Page, PageId, RecordId, PAGE_SIZE};
 pub use disk_btree::DiskBTree;
 pub use parser::{ColumnDef, Condition, DataType, Operator, Statement, Value, WhereClause};
-pub use storage::Database;
+pub use storage::{Database, DiskDatabase};
 pub use wal::WalEntry;
 
 pub fn wal_path(db_path: &str) -> String {
-    if db_path.ends_with(".json") {
+    if db_path.ends_with(".db") {
+        format!("{}.wal", &db_path[..db_path.len() - 3])
+    } else if db_path.ends_with(".json") {
         format!("{}.wal", &db_path[..db_path.len() - 5])
     } else {
         format!("{}.wal", db_path)
     }
 }
 
-pub fn replay_wal(db: &mut Database, wal_path: &str) -> Result<usize, String> {
+pub fn replay_wal(db: &mut DiskDatabase, wal_path: &str) -> Result<usize, String> {
     let all_entries = wal::read(wal_path)?;
 
     let mut created_tables: std::collections::HashSet<String> = std::collections::HashSet::new();
