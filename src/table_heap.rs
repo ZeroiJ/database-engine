@@ -86,6 +86,52 @@ impl TableHeap {
         pool.unpin_page(rid.page_id, false);
         row
     }
+
+    pub fn delete_row(&self, rid: RecordId) -> Result<bool, String> {
+        let mut pool = self.buffer_pool.lock().unwrap();
+        let page = pool
+            .fetch_page(rid.page_id)
+            .map_err(|e| format!("Failed to fetch page {}: {}", rid.page_id, e))?
+            .ok_or_else(|| format!("Page {} not found", rid.page_id))?;
+        let mut table_page = TablePage::decode(&page.data);
+        let existed = table_page.delete_row(rid.slot_id);
+        page.data = table_page.encode();
+        pool.unpin_page(rid.page_id, true);
+        Ok(existed)
+    }
+
+    pub fn scan(&self) -> Result<Vec<(RecordId, Row)>, String> {
+        let mut results = Vec::new();
+        let mut current_page_id = Some(self.first_page_id);
+        let mut pool = self.buffer_pool.lock().unwrap();
+
+        while let Some(page_id) = current_page_id {
+            let page = pool
+                .fetch_page(page_id)
+                .map_err(|e| format!("Failed to fetch page {}: {}", page_id, e))?
+                .ok_or_else(|| format!("Page {} not found", page_id))?;
+            let table_page = TablePage::decode(&page.data);
+            pool.unpin_page(page_id, false);
+
+            for (&slot_id, row) in &table_page.rows {
+                results.push((
+                    RecordId { page_id, slot_id },
+                    row.clone(),
+                ));
+            }
+
+            current_page_id = table_page.next_page_id;
+        }
+
+        Ok(results)
+    }
+
+    pub fn update_row(&mut self, rid: RecordId, row: Row) -> Result<RecordId, String> {
+        self.delete_row(rid)
+            .map_err(|e| format!("Failed to delete old row at {:?}: {}", rid, e))?;
+        self.insert_row(row)
+            .map_err(|e| format!("Failed to insert updated row: {}", e))
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +198,67 @@ mod tests {
         }
 
         assert_ne!(heap.first_page_id, heap.last_page_id);
+    }
+
+    #[test]
+    fn test_delete_row() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let dm = DiskManager::new(temp_file.path()).unwrap();
+        let bpm = BufferPoolManager::new(10, dm);
+        let pool = Arc::new(Mutex::new(bpm));
+        let mut heap = TableHeap::new(pool);
+
+        let rid = heap.insert_row(make_row(1)).unwrap();
+        assert!(heap.get_row(rid).is_some());
+
+        let existed = heap.delete_row(rid).unwrap();
+        assert!(existed);
+        assert!(heap.get_row(rid).is_none());
+
+        // Deleting again should return false
+        let existed_again = heap.delete_row(rid).unwrap();
+        assert!(!existed_again);
+    }
+
+    #[test]
+    fn test_scan() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let dm = DiskManager::new(temp_file.path()).unwrap();
+        let bpm = BufferPoolManager::new(10, dm);
+        let pool = Arc::new(Mutex::new(bpm));
+        let mut heap = TableHeap::new(pool);
+
+        let mut rids = Vec::new();
+        for i in 1..=5 {
+            rids.push(heap.insert_row(make_row(i)).unwrap());
+        }
+
+        let rows = heap.scan().unwrap();
+        assert_eq!(rows.len(), 5);
+
+        // Every inserted RID must appear in the scan results
+        for rid in &rids {
+            assert!(rows.iter().any(|(r, _)| r == rid));
+        }
+    }
+
+    #[test]
+    fn test_update_row() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let dm = DiskManager::new(temp_file.path()).unwrap();
+        let bpm = BufferPoolManager::new(10, dm);
+        let pool = Arc::new(Mutex::new(bpm));
+        let mut heap = TableHeap::new(pool);
+
+        let rid = heap.insert_row(make_row(1)).unwrap();
+        let new_row = make_row(42);
+        let new_rid = heap.update_row(rid, new_row.clone()).unwrap();
+
+        // Old location should be empty
+        assert!(heap.get_row(rid).is_none());
+
+        // New location should have the updated data
+        let fetched = heap.get_row(new_rid).unwrap();
+        assert_eq!(fetched, new_row);
     }
 }
