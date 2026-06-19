@@ -27,6 +27,10 @@ path = "src/client.rs"
 name = "rustdb-hammer"
 path = "src/load_tester.rs"
 
+[[bin]]
+name = "bench-1m"
+path = "src/bench_1m.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

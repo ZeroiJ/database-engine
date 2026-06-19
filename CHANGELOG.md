@@ -26,6 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Indexes are in-memory only (rebuilt via `CREATE INDEX` after restart)
 - **11 new tests**: hash collision, float ordering, range scans (gt/lt), index maintenance on insert/delete
 
+#### 1M Row Benchmark
+- **Benchmark binary**: New `bench-1m` binary for comprehensive performance testing
+- **In-memory results** (1M rows, release mode):
+  - Bulk INSERT: 678ms (1.47M rows/sec)
+  - B-Tree depth: 19 levels for 1M rows (t=2)
+  - CREATE INDEX: 628-757ms per index
+  - Equality SELECT (indexed, 1000×): 0.35µs per query
+  - Range SELECT (indexed): 113-184ms for 300K-500K rows
+  - Full Scan (no index): 278ms for 1M rows
+  - SELECT ALL: 327ms for 1M rows
+  - DELETE 1K rows (2 indexes): 450ms
+- **Key insight**: Indexed equality is 0.35µs vs 214s without index (600M× speedup)
+- **Known limitation**: DiskDatabase panics at 100K rows due to 4KB page size constraint (TablePage serialization overflow)
+
 #### WAL Robustness (Phase 11)
 - **Graceful recovery**: WAL entries that fail to deserialize are skipped, not fatal
   - Old-format or corrupted WAL files no longer crash the database
