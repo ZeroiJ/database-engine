@@ -4,6 +4,46 @@ Record of all benchmark runs over time. Add new entries at the top.
 
 ---
 
+## 2026-06-20 — YCSB Benchmark (Release Mode)
+
+**Commit:** `ef62cd6`
+**Build:** `cargo build --release`
+**Hardware:** AMD Ryzen 5 5600H (6C/12T, 3.99 GHz), 15 GB RAM
+**OS:** Arch Linux 7.0.9, x86_64
+**Standard:** Yahoo! Cloud Serving Benchmark (YCSB)
+**Config:** 10K records, 10K operations/workload, 10 fields × 100 bytes, Zipfian theta=0.99
+
+### Workload Results
+
+| Workload | Description | ops/sec | Time | Notes |
+|----------|-------------|---------|------|-------|
+| **A** | 50% read, 50% update | **928,755** | 0.01s | Direct B-Tree overwrite (bypasses buggy delete+insert) |
+| **B** | 95% read, 5% insert | **4,622** | 2.16s | Read fast, insert slow (index maintenance) |
+| **C** | 100% read | **763,331** | 0.01s | Pure indexed reads |
+| **D** | 95% read, 5% insert-latest | **5,479** | 1.83s | Similar to B |
+| **E** | 95% scan, 5% insert | **40** | 249.76s | Range scans very slow (full BTree traversal) |
+| **F** | 50% read, 50% read-modify-write | **577,528** | 0.02s | Read + direct overwrite |
+
+### Analysis
+
+- **Reads are blazing fast**: 763K-929K ops/sec with indexed equality lookups
+- **Updates bypass B-Tree bug**: Direct `table.rows.insert()` overwrite avoids `delete()` bug
+- **Inserts are slow**: ~5K ops/sec due to index maintenance + string allocation
+- **Scans are the bottleneck**: 40 ops/sec — range queries traverse entire BTree (O(N) not O(log N + K))
+- **Known bug**: `BTree::delete()` corrupts tree invariants — exposed by UPDATE workload
+
+### Schema
+
+```sql
+CREATE TABLE usertable (
+    YCSB_KEY INT,
+    field0 TEXT, field1 TEXT, ..., field9 TEXT
+)
+CREATE INDEX pk_index ON usertable (YCSB_KEY)
+```
+
+---
+
 ## 2026-06-20 — 1M Row Benchmark (Release Mode)
 
 **Commit:** `ef62cd6`
