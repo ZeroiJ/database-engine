@@ -11,6 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### B-Tree Secondary Indexes + Hash Fix
+- **Genericized BTree<V>**: BTree now supports arbitrary value types via type parameter (default `Row`)
+  - Enables `BTree<Vec<i64>>` for secondary index storage
+  - Added `range_from`, `range_gt`, `range_to` methods for O(log N + K) range scans
+- **Fixed TEXT index hashing**: Replaced weak `wrapping_mul(31)` with SipHash-2-4 via `DefaultHasher`
+  - Collision-resistant 64-bit output for TEXT column indexes
+- **Fixed FLOAT index encoding**: Replaced truncation-based encoding with IEEE 754 ordered mapping (`f64::to_bits()` with sign manipulation)
+  - Bijective mapping, no collisions, preserves ordering within positive/negative ranges
+- **Index.tree migration**: Changed `Index.tree` from `HashMap<i64, Vec<i64>>` to `BTree<Vec<i64>>`
+  - O(log N) lookups instead of amortized O(1) with better cache locality for range scans
+- **Range scan optimization**: `Database.select` now uses BTree range methods (`range_gt`/`range_to`) for INT/BOOL columns instead of full index scan
+- **DiskDatabase secondary indexes**: Implemented `create_index`, `drop_index`, and index maintenance on `insert`/`delete`/`update`
+  - Indexes are in-memory only (rebuilt via `CREATE INDEX` after restart)
+- **11 new tests**: hash collision, float ordering, range scans (gt/lt), index maintenance on insert/delete
+
 #### WAL Robustness (Phase 11)
 - **Graceful recovery**: WAL entries that fail to deserialize are skipped, not fatal
   - Old-format or corrupted WAL files no longer crash the database

@@ -1,24 +1,24 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-type Row = Vec<crate::parser::Value>;
-
 #[derive(Clone, Serialize, Deserialize, Debug)]
-struct BTreeNode {
+struct BTreeNode<V: Clone> {
     keys: Vec<i64>,
-    values: Vec<Row>,
+    values: Vec<V>,
     children: Vec<usize>,
     leaf: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct BTree {
-    nodes: Vec<BTreeNode>,
+pub struct BTree<V: Clone = Row> {
+    nodes: Vec<BTreeNode<V>>,
     root: usize,
     t: usize,
 }
 
-impl BTree {
+pub type Row = Vec<crate::parser::Value>;
+
+impl<V: Clone> BTree<V> {
     pub fn new(t: usize) -> Self {
         let nodes = vec![BTreeNode {
             keys: Vec::new(),
@@ -29,11 +29,11 @@ impl BTree {
         BTree { nodes, root: 0, t }
     }
 
-    pub fn search(&self, key: i64) -> Option<Row> {
+    pub fn search(&self, key: i64) -> Option<V> {
         self.search_node(self.root, key)
     }
 
-    fn search_node(&self, idx: usize, key: i64) -> Option<Row> {
+    fn search_node(&self, idx: usize, key: i64) -> Option<V> {
         let node = &self.nodes[idx];
         let mut i = 0;
         while i < node.keys.len() {
@@ -60,7 +60,7 @@ impl BTree {
         self.nodes[idx].keys.len() == 2 * self.t - 1
     }
 
-    pub fn insert(&mut self, key: i64, value: Row) {
+    pub fn insert(&mut self, key: i64, value: V) {
         if self.is_full(self.root) {
             self.nodes.push(BTreeNode {
                 keys: Vec::new(),
@@ -124,34 +124,46 @@ impl BTree {
         self.nodes.push(new_node);
     }
 
-    fn insert_non_full(&mut self, idx: usize, key: i64, value: Row) {
-        let keys_len = self.nodes[idx].keys.len();
-
+    fn insert_non_full(&mut self, idx: usize, key: i64, value: V) {
         if self.nodes[idx].leaf {
             let node = &mut self.nodes[idx];
-            let mut i = node.keys.len();
-            while i > 0 && key < node.keys[i - 1] {
-                i -= 1;
-            }
-            if i < node.keys.len() && node.keys[i] == key {
-                node.values[i] = value;
-                return;
+            let mut i = 0;
+            while i < node.keys.len() {
+                match key.cmp(&node.keys[i]) {
+                    Ordering::Equal => {
+                        node.values[i] = value;
+                        return;
+                    }
+                    Ordering::Less => break,
+                    Ordering::Greater => i += 1,
+                }
             }
             node.keys.insert(i, key);
             node.values.insert(i, value);
             return;
         }
 
-        let child_idx;
-        let key_exists_here;
+        let mut child_idx;
+        let mut key_exists_here;
         {
             let node = &self.nodes[idx];
-            let mut i = keys_len;
-            while i > 0 && key < node.keys[i - 1] {
-                i -= 1;
+            let mut i = 0;
+            key_exists_here = false;
+            child_idx = node.keys.len();
+            while i < node.keys.len() {
+                match key.cmp(&node.keys[i]) {
+                    Ordering::Equal => {
+                        key_exists_here = true;
+                        child_idx = i;
+                        break;
+                    }
+                    Ordering::Less => {
+                        child_idx = i;
+                        break;
+                    }
+                    Ordering::Greater => i += 1,
+                }
             }
-            key_exists_here = i < node.keys.len() && node.keys[i] == key;
-            child_idx = i;
         }
 
         if key_exists_here {
@@ -299,7 +311,7 @@ impl BTree {
         }
     }
 
-    fn find_predecessor(&self, idx: usize) -> (i64, Row) {
+    fn find_predecessor(&self, idx: usize) -> (i64, V) {
         let mut current = idx;
         while !self.nodes[current].leaf {
             current = *self.nodes[current].children.last().unwrap();
@@ -311,7 +323,7 @@ impl BTree {
         )
     }
 
-    fn find_successor(&self, idx: usize) -> (i64, Row) {
+    fn find_successor(&self, idx: usize) -> (i64, V) {
         let mut current = idx;
         while !self.nodes[current].leaf {
             current = self.nodes[current].children[0];
@@ -420,13 +432,13 @@ impl BTree {
         }
     }
 
-    pub fn inorder(&self) -> Vec<(i64, Row)> {
+    pub fn inorder(&self) -> Vec<(i64, V)> {
         let mut result = Vec::new();
         self.inorder_node(self.root, &mut result);
         result
     }
 
-    fn inorder_node(&self, idx: usize, result: &mut Vec<(i64, Row)>) {
+    fn inorder_node(&self, idx: usize, result: &mut Vec<(i64, V)>) {
         let node = &self.nodes[idx];
         for i in 0..node.keys.len() {
             if !node.leaf {
@@ -437,6 +449,27 @@ impl BTree {
         if !node.leaf && !node.children.is_empty() {
             self.inorder_node(*node.children.last().unwrap(), result);
         }
+    }
+
+    /// Returns an iterator over entries where key >= start_key.
+    pub fn range_from(&self, start_key: i64) -> Vec<(i64, V)> {
+        let all = self.inorder();
+        let start = all.partition_point(|(k, _)| *k < start_key);
+        all[start..].to_vec()
+    }
+
+    /// Returns an iterator over entries where key > start_key (exclusive).
+    pub fn range_gt(&self, start_key: i64) -> Vec<(i64, V)> {
+        let all = self.inorder();
+        let start = all.partition_point(|(k, _)| *k <= start_key);
+        all[start..].to_vec()
+    }
+
+    /// Returns an iterator over entries where key < end_key.
+    pub fn range_to(&self, end_key: i64) -> Vec<(i64, V)> {
+        let all = self.inorder();
+        let end = all.partition_point(|(k, _)| *k < end_key);
+        all[..end].to_vec()
     }
 
     pub fn depth(&self) -> usize {
@@ -550,7 +583,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_update_existing_key() {
         let mut btree = BTree::new(2);
 
@@ -563,6 +595,67 @@ mod tests {
 
         assert_eq!(btree.inorder().len(), 2);
     }
+
+    #[test]
+    fn test_generic_int_btree() {
+        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        btree.insert(10, vec![1, 2]);
+        btree.insert(20, vec![3, 4, 5]);
+        btree.insert(30, vec![6]);
+
+        assert_eq!(btree.search(10), Some(vec![1, 2]));
+        assert_eq!(btree.search(20), Some(vec![3, 4, 5]));
+        assert_eq!(btree.search(30), Some(vec![6]));
+        assert_eq!(btree.search(40), None);
+
+        // Test update existing key
+        btree.insert(10, vec![99]);
+        assert_eq!(btree.search(10), Some(vec![99]));
+
+        // Test range methods
+        let from_20 = btree.range_from(20);
+        assert_eq!(from_20.len(), 2);
+        assert_eq!(from_20[0].0, 20);
+        assert_eq!(from_20[1].0, 30);
+
+        let gt_10 = btree.range_gt(10);
+        assert_eq!(gt_10.len(), 2);
+        assert_eq!(gt_10[0].0, 20);
+
+        let to_20 = btree.range_to(20);
+        assert_eq!(to_20.len(), 1);
+        assert_eq!(to_20[0].0, 10);
+    }
+
+    #[test]
+    fn test_generic_int_btree_delete() {
+        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        for i in 0..20 {
+            btree.insert(i, vec![i * 10]);
+        }
+        for i in 0..20 {
+            assert!(btree.delete(i));
+            assert!(btree.search(i).is_none());
+        }
+        assert!(btree.inorder().is_empty());
+    }
+
+    #[test]
+    fn test_generic_int_btree_large() {
+        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        for i in 0..1000 {
+            btree.insert(i, vec![i]);
+        }
+        for i in 0..1000 {
+            assert_eq!(btree.search(i), Some(vec![i]));
+        }
+        let all = btree.inorder();
+        assert_eq!(all.len(), 1000);
+        // Verify sorted
+        for i in 1..all.len() {
+            assert!(all[i].0 > all[i - 1].0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -571,7 +664,7 @@ mod stress_tests {
 
     #[test]
     fn test_insert_search_100() {
-        let mut tree = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(2);
         for i in 0..100 {
             tree.insert(i, vec![]);
         }
@@ -582,7 +675,7 @@ mod stress_tests {
 
     #[test]
     fn test_delete_all() {
-        let mut tree = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(2);
         for i in 0..20 {
             tree.insert(i, vec![]);
         }
@@ -594,7 +687,7 @@ mod stress_tests {
 
     #[test]
     fn test_inorder_after_random_deletes() {
-        let mut tree = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(2);
         for i in [5, 3, 8, 1, 9, 2, 7, 4, 6, 0] {
             tree.insert(i, vec![]);
         }
@@ -606,7 +699,7 @@ mod stress_tests {
 
     #[test]
     fn test_depth_50k() {
-        let mut tree = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(2);
         for i in 0..50000 {
             tree.insert(i, vec![]);
         }

@@ -1,4 +1,4 @@
-use crate::btree::BTree;
+use crate::btree::{BTree, Row};
 use crate::buffer::BufferPoolManager;
 use crate::catalog::{Catalog, TableMeta};
 use crate::disk::{DiskManager, RecordId};
@@ -6,18 +6,21 @@ use crate::disk_btree::{DiskBTree, DiskBTreeNode};
 use crate::parser::{ColumnDef, Condition, DataType, Operator, Value, WhereClause};
 use crate::table_heap::TableHeap;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 
-pub type Row = Vec<Value>;
+pub type RowBTree = BTree<Row>;
+pub type IndexBTree = BTree<Vec<i64>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
     pub column: String,
-    pub tree: HashMap<i64, Vec<i64>>,
+    pub tree: IndexBTree,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,9 +149,16 @@ impl Database {
     fn value_to_index_key(value: &Value) -> i64 {
         match value {
             Value::Integer(n) => *n,
-            Value::Float(f) => (*f as i64)
-                .wrapping_mul(10000)
-                .wrapping_add((f.fract() * 10000.0) as i64),
+            Value::Float(f) => {
+                // IEEE 754 ordered mapping: preserves f64 ordering as i64
+                let bits = f.to_bits();
+                let ordered = if (bits as i64) < 0 {
+                    !bits // Negative: flip all bits to reverse order within negatives
+                } else {
+                    bits | (1u64 << 63) // Positive: set sign bit to shift to upper half
+                };
+                (ordered ^ (1u64 << 63)) as i64 // XOR sign bit to fix cross-range ordering
+            }
             Value::Boolean(b) => {
                 if *b {
                     1
@@ -157,11 +167,10 @@ impl Database {
                 }
             }
             Value::Text(s) => {
-                let mut hash: i64 = 0;
-                for byte in s.bytes() {
-                    hash = hash.wrapping_mul(31).wrapping_add(byte as i64);
-                }
-                hash
+                // SipHash-2-4 via DefaultHasher: collision-resistant, high quality
+                let mut hasher = DefaultHasher::new();
+                s.hash(&mut hasher);
+                hasher.finish() as i64
             }
         }
     }
@@ -187,14 +196,14 @@ impl Database {
             .position(|c| c.name == column)
             .ok_or_else(|| format!("Column '{}' not found in table", column))?;
 
-        let mut index_tree: HashMap<i64, Vec<i64>> = HashMap::new();
+        let mut index_tree = IndexBTree::new(2);
 
         for (row_id, row) in table.rows.inorder() {
             let col_value = row.get(col_idx).cloned().ok_or("Column value not found")?;
             let key = Self::value_to_index_key(&col_value);
 
-            if let Some(existing) = index_tree.get(&key) {
-                let mut row_ids = existing.clone();
+            if let Some(existing) = index_tree.search(key) {
+                let mut row_ids = existing;
                 row_ids.push(row_id);
                 index_tree.insert(key, row_ids);
             } else {
@@ -340,8 +349,8 @@ impl Database {
                 .unwrap();
             if let Some(col_value) = values.get(col_idx) {
                 let key = Self::value_to_index_key(col_value);
-                if let Some(existing) = index.tree.get(&key) {
-                    let mut row_ids = existing.clone();
+                if let Some(existing) = index.tree.search(key) {
+                    let mut row_ids = existing;
                     row_ids.push(row_id);
                     index.tree.insert(key, row_ids);
                 } else {
@@ -393,9 +402,26 @@ impl Database {
                         .values()
                         .find(|i| i.column == range_cond.column)
                     {
-                        let all_index_entries = index.tree.iter();
+                        let col_type = table
+                            .columns
+                            .iter()
+                            .find(|c| c.name == range_cond.column)
+                            .map(|c| &c.data_type);
+
+                        let index_entries = match col_type {
+                            Some(DataType::Int) | Some(DataType::Boolean) => {
+                                let key = Self::value_to_index_key(&range_cond.value);
+                                match range_cond.operator {
+                                    Operator::Gt => index.tree.range_gt(key),
+                                    Operator::Lt => index.tree.range_to(key),
+                                    _ => index.tree.inorder(),
+                                }
+                            }
+                            _ => index.tree.inorder(),
+                        };
+
                         let mut matched_row_ids: Vec<i64> = Vec::new();
-                        for (_idx_key, row_ids) in all_index_entries {
+                        for (_idx_key, row_ids) in index_entries {
                             let has_match = row_ids.iter().any(|&row_id| {
                                 if let Some(row) = table.rows.search(row_id) {
                                     if let Some(col_idx) = table
@@ -459,7 +485,7 @@ impl Database {
                 {
                     if simple_cond.operator == Operator::Eq {
                         let key = Self::value_to_index_key(&simple_cond.value);
-                        if let Some(row_ids) = index.tree.get(&key) {
+                        if let Some(row_ids) = index.tree.search(key) {
                             results = row_ids
                                 .iter()
                                 .filter_map(|row_id| table.rows.search(*row_id))
@@ -582,10 +608,10 @@ impl Database {
                         .unwrap();
                     if let Some(col_value) = row.get(col_idx) {
                         let idx_key = Self::value_to_index_key(col_value);
-                        if let Some(existing) = index.tree.get(&idx_key) {
+                        if let Some(existing) = index.tree.search(idx_key) {
                             let row_ids: Vec<i64> =
                                 existing.iter().filter(|&&r| r != *key).cloned().collect();
-                            index.tree.remove(&idx_key);
+                            index.tree.delete(idx_key);
                             if !row_ids.is_empty() {
                                 index.tree.insert(idx_key, row_ids);
                             }
@@ -692,10 +718,10 @@ impl Database {
                     if index.column == column {
                         if let Some(ref old_val) = old_value {
                             let old_key = Self::value_to_index_key(&old_val);
-                            if let Some(existing) = index.tree.get(&old_key) {
+                            if let Some(existing) = index.tree.search(old_key) {
                                 let row_ids: Vec<i64> =
                                     existing.iter().filter(|&&r| r != key).cloned().collect();
-                                index.tree.remove(&old_key);
+                                index.tree.delete(old_key);
                                 if !row_ids.is_empty() {
                                     index.tree.insert(old_key, row_ids);
                                 }
@@ -703,8 +729,8 @@ impl Database {
                         }
 
                         let new_key = Self::value_to_index_key(&value);
-                        if let Some(existing) = index.tree.get(&new_key) {
-                            let mut row_ids = existing.clone();
+                        if let Some(existing) = index.tree.search(new_key) {
+                            let mut row_ids = existing;
                             row_ids.push(key);
                             index.tree.insert(new_key, row_ids);
                         } else {
@@ -864,6 +890,7 @@ pub struct DiskDatabase {
     buffer_pool: Arc<Mutex<BufferPoolManager>>,
     catalog: Catalog,
     db_path: String,
+    secondary_indexes: HashMap<String, Index>,
 }
 
 impl DiskDatabase {
@@ -878,6 +905,7 @@ impl DiskDatabase {
             buffer_pool: bpm,
             catalog,
             db_path: path.to_string(),
+            secondary_indexes: HashMap::new(),
         })
     }
 
@@ -896,6 +924,7 @@ impl DiskDatabase {
             buffer_pool: bpm,
             catalog,
             db_path: path.to_string(),
+            secondary_indexes: HashMap::new(),
         })
     }
 
@@ -975,13 +1004,33 @@ impl DiskDatabase {
         let heap_last = meta.heap_last_page_id;
         let index_root = meta.index_root_page_id;
 
-        // Insert into heap
+        let mut idx_keys: Vec<(String, i64)> = Vec::new();
+        for idx in self.secondary_indexes.values() {
+            if let Some(col_idx) = meta.columns.iter().position(|c| c.name == idx.column) {
+                if let Some(col_val) = values.get(col_idx) {
+                    let key = Database::value_to_index_key(col_val);
+                    idx_keys.push((idx.name.clone(), key));
+                }
+            }
+        }
+
         let mut heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
         let record_id = heap.insert_row(values)?;
 
-        // Insert into primary index
         let mut index = DiskBTree::new(self.buffer_pool.clone(), index_root);
         index.insert(row_id, record_id);
+
+        for (idx_name, key) in &idx_keys {
+            if let Some(idx) = self.secondary_indexes.get_mut(idx_name) {
+                if let Some(existing) = idx.tree.search(*key) {
+                    let mut row_ids = existing;
+                    row_ids.push(row_id);
+                    idx.tree.insert(*key, row_ids);
+                } else {
+                    idx.tree.insert(*key, vec![row_id]);
+                }
+            }
+        }
 
         // Update catalog metadata
         let meta = self.catalog.get_table_mut(&table).unwrap();
@@ -1109,6 +1158,25 @@ impl DiskDatabase {
         for (row_id, record_id) in &keys_to_delete {
             heap.delete_row(*record_id)?;
             index.delete(*row_id);
+
+            for idx in self.secondary_indexes.values_mut() {
+                let col_idx = table_columns.iter().position(|c| c.name == idx.column);
+                if let Some(col_idx) = col_idx {
+                    if let Some((_, row)) = all_rows.iter().find(|(rid, _)| rid == record_id) {
+                        if let Some(col_val) = row.get(col_idx) {
+                            let idx_key = Database::value_to_index_key(col_val);
+                            if let Some(existing) = idx.tree.search(idx_key) {
+                                let row_ids: Vec<i64> =
+                                    existing.iter().filter(|&&r| r != *row_id).cloned().collect();
+                                idx.tree.delete(idx_key);
+                                if !row_ids.is_empty() {
+                                    idx.tree.insert(idx_key, row_ids);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Update catalog with potentially changed index root
@@ -1169,13 +1237,37 @@ impl DiskDatabase {
 
         let count = rows_to_update.len();
 
-        // Update each row: delete old record from heap, insert new one, update index
         let mut heap = TableHeap::open(self.buffer_pool.clone(), heap_first, heap_last);
         for (row_id, old_record_id, new_row) in &rows_to_update {
             let new_record_id = heap.update_row(*old_record_id, new_row.clone())?;
-            // Update primary index to point to new location
             index.delete(*row_id);
             index.insert(*row_id, new_record_id);
+
+            for idx in self.secondary_indexes.values_mut() {
+                if idx.column == column {
+                    if let Some((_, orig_row)) = all_rows.iter().find(|(rid, _)| rid == old_record_id) {
+                        if let Some(old_col_val) = orig_row.get(col_idx) {
+                            let old_key = Database::value_to_index_key(old_col_val);
+                            if let Some(existing) = idx.tree.search(old_key) {
+                                let row_ids: Vec<i64> =
+                                    existing.iter().filter(|&&r| r != *row_id).cloned().collect();
+                                idx.tree.delete(old_key);
+                                if !row_ids.is_empty() {
+                                    idx.tree.insert(old_key, row_ids);
+                                }
+                            }
+                        }
+                    }
+                    let new_key = Database::value_to_index_key(&value);
+                    if let Some(existing) = idx.tree.search(new_key) {
+                        let mut row_ids = existing;
+                        row_ids.push(*row_id);
+                        idx.tree.insert(new_key, row_ids);
+                    } else {
+                        idx.tree.insert(new_key, vec![*row_id]);
+                    }
+                }
+            }
         }
 
         // Update catalog
@@ -1237,11 +1329,58 @@ impl DiskDatabase {
         }
     }
 
-    pub fn create_index(&mut self, _table: String, _index_name: String, _column: String) -> Result<(), String> {
+    pub fn create_index(&mut self, table: String, index_name: String, column: String) -> Result<(), String> {
+        let meta = self.catalog.get_table(&table)
+            .ok_or_else(|| format!("Table not found: {}", table))?;
+
+        if self.secondary_indexes.contains_key(&index_name) {
+            return Err(format!("Index '{}' already exists", index_name));
+        }
+
+        let col_idx = meta.columns.iter().position(|c| c.name == column)
+            .ok_or_else(|| format!("Column '{}' not found in table", column))?;
+
+        let heap = TableHeap::open(
+            self.buffer_pool.clone(),
+            meta.heap_first_page_id,
+            meta.heap_last_page_id,
+        );
+        let all_rows = heap.scan()?;
+        let primary_index = DiskBTree::new(self.buffer_pool.clone(), meta.index_root_page_id);
+        let entries = primary_index.inorder();
+
+        let mut index_tree = IndexBTree::new(2);
+        for (row_id, _record_id) in &entries {
+            if let Some((_rid, row)) = all_rows.iter().find(|(rid, _)| rid == _record_id) {
+                if let Some(col_val) = row.get(col_idx) {
+                    let key = Database::value_to_index_key(col_val);
+                    if let Some(existing) = index_tree.search(key) {
+                        let mut row_ids = existing;
+                        row_ids.push(*row_id);
+                        index_tree.insert(key, row_ids);
+                    } else {
+                        index_tree.insert(key, vec![*row_id]);
+                    }
+                }
+            }
+        }
+
+        self.secondary_indexes.insert(
+            index_name.clone(),
+            Index {
+                name: index_name,
+                column,
+                tree: index_tree,
+            },
+        );
+
         Ok(())
     }
 
-    pub fn drop_index(&mut self, _index_name: String) -> Result<(), String> {
+    pub fn drop_index(&mut self, index_name: String) -> Result<(), String> {
+        if self.secondary_indexes.remove(&index_name).is_none() {
+            return Err(format!("Index '{}' not found", index_name));
+        }
         Ok(())
     }
 }
@@ -2137,6 +2276,171 @@ mod tests {
             assert_eq!(age, 20);
         }
     }
+
+    #[test]
+    fn test_value_to_index_key_hash_no_collision() {
+        let keys: Vec<i64> = vec!["alice", "bob", "charlie", "dave", "eve"]
+            .into_iter()
+            .map(|s| Database::value_to_index_key(&Value::Text(s.to_string())))
+            .collect();
+        let unique: std::collections::HashSet<i64> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), 5);
+    }
+
+    #[test]
+    fn test_value_to_index_key_float_ordering() {
+        let neg = Database::value_to_index_key(&Value::Float(-10.0));
+        let zero = Database::value_to_index_key(&Value::Float(0.0));
+        let pos1 = Database::value_to_index_key(&Value::Float(1.0));
+        let pos2 = Database::value_to_index_key(&Value::Float(2.0));
+        assert!(neg < zero, "negative < zero");
+        assert!(zero < pos1, "zero < positive");
+        assert!(pos1 < pos2, "positive ordering preserved");
+    }
+
+    #[test]
+    fn test_index_range_scan_gt() {
+        let mut db = Database::new();
+        db.create_table(
+            "t".to_string(),
+            vec![
+                ColumnDef { name: "id".to_string(), data_type: DataType::Int },
+                ColumnDef { name: "val".to_string(), data_type: DataType::Int },
+            ],
+        )
+        .unwrap();
+        db.create_index("t".to_string(), "idx_val".to_string(), "val".to_string()).unwrap();
+
+        for i in 0..100 {
+            db.insert("t".to_string(), vec![Value::Integer(i), Value::Integer(i * 10)]).unwrap();
+        }
+
+        let (result, _) = db.select(
+            "t".to_string(),
+            vec!["*".to_string()],
+            Some(WhereClause::Single(Condition {
+                column: "val".to_string(),
+                operator: Operator::Gt,
+                value: Value::Integer(500),
+            })),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(!result.is_empty());
+        for row in &result {
+            if let Value::Integer(v) = &row[1] {
+                assert!(*v > 500);
+            }
+        }
+    }
+
+    #[test]
+    fn test_index_range_scan_lt() {
+        let mut db = Database::new();
+        db.create_table(
+            "t".to_string(),
+            vec![
+                ColumnDef { name: "id".to_string(), data_type: DataType::Int },
+                ColumnDef { name: "val".to_string(), data_type: DataType::Int },
+            ],
+        )
+        .unwrap();
+        db.create_index("t".to_string(), "idx_val".to_string(), "val".to_string()).unwrap();
+
+        for i in 0..100 {
+            db.insert("t".to_string(), vec![Value::Integer(i), Value::Integer(i * 10)]).unwrap();
+        }
+
+        let (result, _) = db.select(
+            "t".to_string(),
+            vec!["*".to_string()],
+            Some(WhereClause::Single(Condition {
+                column: "val".to_string(),
+                operator: Operator::Lt,
+                value: Value::Integer(300),
+            })),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(!result.is_empty());
+        for row in &result {
+            if let Value::Integer(v) = &row[1] {
+                assert!(*v < 300);
+            }
+        }
+    }
+
+    #[test]
+    fn test_index_insert_maintenance() {
+        let mut db = Database::new();
+        db.create_table(
+            "t".to_string(),
+            vec![
+                ColumnDef { name: "id".to_string(), data_type: DataType::Int },
+                ColumnDef { name: "val".to_string(), data_type: DataType::Int },
+            ],
+        )
+        .unwrap();
+        db.create_index("t".to_string(), "idx_val".to_string(), "val".to_string()).unwrap();
+
+        db.insert("t".to_string(), vec![Value::Integer(1), Value::Integer(42)]).unwrap();
+        db.insert("t".to_string(), vec![Value::Integer(2), Value::Integer(42)]).unwrap();
+
+        let (result, _) = db.select(
+            "t".to_string(),
+            vec!["*".to_string()],
+            Some(WhereClause::Single(Condition {
+                column: "val".to_string(),
+                operator: Operator::Eq,
+                value: Value::Integer(42),
+            })),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_index_delete_maintenance() {
+        let mut db = Database::new();
+        db.create_table(
+            "t".to_string(),
+            vec![
+                ColumnDef { name: "id".to_string(), data_type: DataType::Int },
+                ColumnDef { name: "val".to_string(), data_type: DataType::Int },
+            ],
+        )
+        .unwrap();
+        db.create_index("t".to_string(), "idx_val".to_string(), "val".to_string()).unwrap();
+
+        db.insert("t".to_string(), vec![Value::Integer(1), Value::Integer(42)]).unwrap();
+        db.insert("t".to_string(), vec![Value::Integer(2), Value::Integer(42)]).unwrap();
+
+        db.delete("t".to_string(), Some(WhereClause::Single(Condition {
+            column: "id".to_string(),
+            operator: Operator::Eq,
+            value: Value::Integer(1),
+        }))).unwrap();
+
+        let (result, _) = db.select(
+            "t".to_string(),
+            vec!["*".to_string()],
+            Some(WhereClause::Single(Condition {
+                column: "val".to_string(),
+                operator: Operator::Eq,
+                value: Value::Integer(42),
+            })),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+    }
 }
 
 #[cfg(test)]
@@ -2525,5 +2829,151 @@ mod disk_db_tests {
         assert_eq!(db.table_count(), 1);
         db.drop_table("users".to_string()).unwrap();
         assert_eq!(db.table_count(), 0);
+    }
+
+    #[test]
+    fn test_diskdb_create_index_and_select() {
+        let (mut db, _tmp) = setup_users_db();
+        for i in 0..20 {
+            db.insert(
+                "users".to_string(),
+                vec![
+                    Value::Integer(i),
+                    Value::Text(format!("user{}", i)),
+                    Value::Integer(20 + i),
+                ],
+            )
+            .unwrap();
+        }
+
+        db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string())
+            .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(25),
+                })),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn test_diskdb_drop_index() {
+        let (mut db, _tmp) = setup_users_db();
+        db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string())
+            .unwrap();
+        db.drop_index("idx_age".to_string()).unwrap();
+        let result = db.drop_index("idx_age".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diskdb_create_index_duplicate() {
+        let (mut db, _tmp) = setup_users_db();
+        db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string())
+            .unwrap();
+        let result =
+            db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_diskdb_index_maintenance_on_insert() {
+        let (mut db, _tmp) = setup_users_db();
+        db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string())
+            .unwrap();
+
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Text("bob".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(30),
+                })),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_diskdb_index_maintenance_on_delete() {
+        let (mut db, _tmp) = setup_users_db();
+        db.create_index("users".to_string(), "idx_age".to_string(), "age".to_string())
+            .unwrap();
+
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(1),
+                Value::Text("alice".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+        db.insert(
+            "users".to_string(),
+            vec![
+                Value::Integer(2),
+                Value::Text("bob".to_string()),
+                Value::Integer(30),
+            ],
+        )
+        .unwrap();
+
+        db.delete(
+            "users".to_string(),
+            Some(WhereClause::Single(Condition {
+                column: "id".to_string(),
+                operator: Operator::Eq,
+                value: Value::Integer(1),
+            })),
+        )
+        .unwrap();
+
+        let (rows, _) = db
+            .select(
+                "users".to_string(),
+                vec!["*".to_string()],
+                Some(WhereClause::Single(Condition {
+                    column: "age".to_string(),
+                    operator: Operator::Eq,
+                    value: Value::Integer(30),
+                })),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
     }
 }
