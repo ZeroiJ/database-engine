@@ -92,6 +92,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TableDisk**: New disk-backed table struct (optional)
 - All 74 tests pass
 
+#### Catalog Module
+- **catalog.rs**: New module for page-0 table metadata management
+  - Stores catalog schema directly on disk page 0
+  - Exposed via `pub mod catalog` in lib.rs
+
+#### DiskBTree Delete
+- **Full B-Tree deletion**: `delete()` and `delete_entry()` methods
+  - Leaf deletion: direct key/value removal
+  - Internal node deletion: predecessor replacement from left subtree
+  - Child underflow fix: sibling redistribution and node merging
+  - Root shrinkage: promotes first child when root empties
+
+#### TableHeap Update
+- **update_row()**: New method to modify an existing row at a given RecordId
+  - Preserves slot assignment; overwrites row data in-place
+
+#### Planner Integration
+- **planner.rs**: Updated to work with DiskDatabase and page-based storage
+  - Uses disk-backed column count and indexing
+
+#### DiskDatabase CRUD & Integration Tests
+- **DiskDatabase**: Full disk-backed `Database` implementation
+  - `create_table()`: Persist table schema to catalog + allocate B-Tree
+  - `insert()`: Write row to TableHeap, index key in DiskBTree, log to WAL
+  - `select()`: Full scan via TableHeap, index-optimized lookups, WHERE/ORDER BY/LIMIT
+  - `update()`: Find row by key, modify in place on TableHeap page
+  - `delete()`: Remove from DiskBTree + TableHeap by key
+  - `drop_table()`: Clear catalog entry (no-op for actual data pages)
+  - `save()` / `open()`: Binary page persistence, auto-detects new vs existing
+- **`type` alias**: `use DiskDatabase as Database` in main.rs/server.rs
+- **13 integration tests**: create table, insert, select (all/where/order/limit/subset), update, delete, drop table, type validation, column mismatch, persistence round-trip
+
+#### ORDER BY Projected Column Fix
+- **Column subset sorting fixed**: When `SELECT col1, col2` (not `*`) uses ORDER BY, the sort key index now correctly maps from schema column index to projected result index via `column_indices.iter().position(|&i| i == col_idx)`
+- Previously used raw schema index which could be out of bounds for projected results
+
+#### REPL Row Count
+- **execute() returns `(String, usize)`**: Formatted output + actual row count
+- **Singular/plural**: "1 row returned" vs "3 rows returned"
+- **No row count line** for EXPLAIN, CREATE TABLE, CREATE/DROP INDEX (row_count 0 — silent)
+- Removed hardcoded `"2"` row count string
+
+#### WAL Replay Deduplication
+- **Removed 65-line `replay_wal()` from main.rs**: Was a direct duplicate of `database_engine::replay_wal()` from lib.rs
+- Now uses `engine_wal_path()` and `database_engine::replay_wal()` consistently
+
+#### Database Open Simplification
+- **Single `Database::open(&db_path)` call**: `DiskDatabase::open()` handles both new and existing databases internally
+- Removed dead `if file_exists` branch that could never execute (DiskDatabase::open always succeeds)
+- **New-database detection**: Banner shows "new database" when `table_count == 0 && wal_recovered == 0`
+
+#### Server Warning Fix
+- **server.rs**: Unused `db_path` parameter prefixed with `_db_path`
+- Zero warnings from main.rs and server.rs
+
+#### WAL Path Support
+- **wal_path()**: Now handles `.db` extension (generates `.db.wal`) in addition to existing `.json` support
+
 ---
 
 ## [v0.4.1] - 2026-03-24

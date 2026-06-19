@@ -2,7 +2,7 @@ use crate::lexer;
 use crate::parser;
 use crate::parser::Statement;
 use crate::planner;
-use crate::storage::Database;
+use crate::storage::DiskDatabase as Database;
 use crate::wal;
 use crate::wal::WalEntry;
 use colored::Colorize;
@@ -32,7 +32,7 @@ pub fn start(db_path: String, port: u16) {
             .bold()
     );
 
-    let mut db = Database::load(&db_path).unwrap_or_else(|e| {
+    let mut db = Database::open(&db_path).unwrap_or_else(|e| {
         eprintln!("{}", format!("✗ Failed to load database: {}", e).red());
         std::process::exit(1);
     });
@@ -42,7 +42,7 @@ pub fn start(db_path: String, port: u16) {
         match crate::replay_wal(&mut db, &wal_path) {
             Ok(count) => {
                 if count > 0 {
-                    db.save(&db_path).ok();
+                    db.flush().ok();
                     wal::clear(&wal_path).ok();
                     println!(
                         "⚠ WAL recovery: replayed {} operation{}",
@@ -57,7 +57,7 @@ pub fn start(db_path: String, port: u16) {
         }
     }
 
-    let db = Arc::new(db);
+    let db = Arc::new(Mutex::new(db));
     let db_path = Arc::new(db_path);
     let wal_path = Arc::new(wal_path);
     let connection_count = Arc::new(Mutex::new(0usize));
@@ -88,8 +88,8 @@ pub fn start(db_path: String, port: u16) {
 
 fn handle_client(
     mut stream: TcpStream,
-    db: Arc<Database>,
-    db_path: Arc<String>,
+    db_mutex: Arc<Mutex<Database>>,
+    _db_path: Arc<String>,
     wal_path: Arc<String>,
     connection_count: Arc<Mutex<usize>>,
 ) {
@@ -139,7 +139,7 @@ fn handle_client(
         }
 
         if input == ".tables" {
-            let tables = db.table_names();
+            let tables = db_mutex.lock().unwrap().table_names();
             let mut response = String::new();
             if tables.is_empty() {
                 response.push_str("(no tables)\n");
@@ -160,11 +160,10 @@ fn handle_client(
             if table_name.is_empty() {
                 response.push_str("Usage: .schema <table_name>\n");
             } else {
-                let table_lock = db.get_table(table_name);
-                if let Some(table_lock) = table_lock {
-                    let table = table_lock.read().unwrap();
+                let db = db_mutex.lock().unwrap();
+                if let Some(columns) = db.get_columns(table_name) {
                     response.push_str(&format!("Table: {}\n", table_name));
-                    for col in &table.columns {
+                    for col in &columns {
                         let type_str = match col.data_type {
                             crate::parser::DataType::Int => "INT",
                             crate::parser::DataType::Text => "TEXT",
@@ -184,18 +183,14 @@ fn handle_client(
 
         if input == ".stats" {
             let (tables, total_rows, db_size, wal_size) = {
+                let db = db_mutex.lock().unwrap();
                 let tables = db.table_count();
                 let total_rows: usize = db
                     .table_names()
                     .iter()
-                    .filter_map(|t| {
-                        db.get_table(t)
-                            .map(|l| l.read().unwrap().rows.inorder().len())
-                    })
+                    .map(|t| db.get_table_row_count(t))
                     .sum();
-                let db_size = std::fs::metadata(db_path.as_str())
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let db_size = db.db_file_size();
                 let wal_size = std::fs::metadata(wal_path.as_str())
                     .map(|m| m.len())
                     .unwrap_or(0);
@@ -303,15 +298,17 @@ fn handle_client(
         };
 
         let (result, should_save) = if !is_mutation {
-            let result = execute_read(&db, &stmt);
+            let db = db_mutex.lock().unwrap();
+            let result = execute_read(&*db, &stmt);
             (result, false)
         } else {
             if let Some(ref entry) = wal_entry {
                 wal::append(&wal_path, entry).ok();
             }
 
-            let result = execute_write(&*db, stmt);
-            let should_save = db.save(&db_path).is_ok();
+            let mut db = db_mutex.lock().unwrap();
+            let result = execute_write(&mut *db, stmt);
+            let should_save = db.flush().is_ok();
             (result, should_save)
         };
 
@@ -382,21 +379,14 @@ fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
             order_by,
             limit,
         } => {
-            let table_lock = db
-                .get_table(table)
-                .ok_or_else(|| format!("Table not found: {}", table))?;
-            let table = table_lock.read().unwrap();
-            let table_name = table.name.clone();
-            let columns = columns.clone();
-            let condition = condition.clone();
-            let order_by = order_by.clone();
-            let limit = limit.clone();
-            drop(table);
+            let columns_query = columns.clone();
+            let condition_query = condition.clone();
+            let order_by_query = order_by.clone();
+            let limit_query = limit.clone();
 
-            let (rows, _) = db.select(table_name.clone(), columns, condition, order_by, limit)?;
-            let table_lock = db.get_table(&table_name).ok_or("Table not found")?;
-            let table_meta = table_lock.read().unwrap();
-            Ok(format_table_plain(&table_meta.columns, &rows))
+            let (rows, _) = db.select(table.clone(), columns_query, condition_query, order_by_query, limit_query)?;
+            let columns_def = db.get_columns(table).ok_or("Table not found")?;
+            Ok(format_table_plain(&columns_def, &rows))
         }
         Statement::Explain { inner } => {
             if let Some(query_plan) = planner::plan(db, inner) {
@@ -409,7 +399,7 @@ fn execute_read(db: &Database, stmt: &Statement) -> Result<String, String> {
     }
 }
 
-fn execute_write(db: &Database, stmt: Statement) -> Result<String, String> {
+fn execute_write(db: &mut Database, stmt: Statement) -> Result<String, String> {
     match stmt {
         Statement::CreateTable { table, columns } => {
             db.create_table(table.clone(), columns)?;
