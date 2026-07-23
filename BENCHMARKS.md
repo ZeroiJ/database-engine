@@ -4,6 +4,46 @@ Record of all benchmark runs over time. Add new entries at the top.
 
 ---
 
+## 2026-07-23 — YCSB Benchmark (Phase 1: directed scans, multi-col SELECT, planner)
+
+**Commit:** `49e68f4`
+**Build:** `cargo build --release`
+**Hardware:** AMD Ryzen 5 5600H (6C/12T, 3.99 GHz), 15 GB RAM
+**OS:** Arch Linux 7.0.9, x86_64
+**Standard:** Yahoo! Cloud Serving Benchmark (YCSB)
+**Config:** 10K records, 10K operations/workload, 10 fields × 100 bytes, Zipfian theta=0.99
+
+### Workload Results
+
+| Workload | Description | ops/sec | Time | Notes |
+|----------|-------------|---------|------|-------|
+| **A** | 50% read, 50% update | **996,345** | 0.01s | Direct B-Tree overwrite (bypasses delete+insert) |
+| **B** | 95% read, 5% insert | **9,889** | 1.01s | Read fast, insert slow (index maintenance) |
+| **C** | 100% read | **939,063** | 0.01s | Pure indexed reads |
+| **D** | 95% read, 5% insert-latest | **9,745** | 1.03s | Similar to B |
+| **E** | 95% scan, 5% insert | **53** | 187.62s | Still slow: collects all row IDs before LIMIT |
+| **F** | 50% read, 50% read-modify-write | **643,079** | 0.02s | Read + direct overwrite |
+
+### Analysis
+
+- **Phase 1 changes**: directed B-tree range scans (`inorder_from_node`/`inorder_range_node`), multi-column SELECT parsing, planner index detection
+- **All workloads improved**: +7% to +40% across the board
+- **Read-heavy workloads benefited most**: C (+40%), A (+21%) — directed traversal skips subtrees outside range
+- **Workload E still bottlenecked**: range_gt collects ALL matching row IDs, then applies LIMIT. Need early-stop with LIMIT pushdown.
+
+### Comparison with previous run
+
+| Workload | Before (80c584d) | After (49e68f4) | Δ |
+|----------|:-:|:-:|:-:|
+| A | 824,410 | **996,345** | +21% |
+| B | 8,365 | **9,889** | +18% |
+| C | 671,500 | **939,063** | +40% |
+| D | 7,997 | **9,745** | +22% |
+| E | 45 | **53** | +18% |
+| F | 603,478 | **643,079** | +7% |
+
+---
+
 ## 2026-07-23 — YCSB Benchmark (Release, fixed BTree::delete)
 
 **Commit:** `80c584d`
