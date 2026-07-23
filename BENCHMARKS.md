@@ -4,6 +4,32 @@ Record of all benchmark runs over time. Add new entries at the top.
 
 ---
 
+### RustDB vs SQLite Comparison
+
+Same YCSB workloads (10K records, 10K ops, 10×100B fields, Zipfian theta=0.99).
+SQLite running in-memory (`:memory:`) with `PRAGMA synchronous=OFF, journal_mode=MEMORY` for fair comparison.
+
+| Workload | RustDB (t=32) | SQLite | Ratio | Winner |
+|----------|:-:|:-:|:-:|:-:|
+| A (50% read, 50% update) | **1,100,973** | 252,994 | 4.35× | rustdb |
+| B (95% read, 5% insert) | 48,057 | **218,886** | 0.22× | SQLite |
+| C (100% read) | **917,622** | 225,724 | 4.07× | rustdb |
+| D (95% read, 5% insert-latest) | 48,025 | **217,757** | 0.22× | SQLite |
+| E (95% scan, 5% insert) | 62 | **30,908** | 0.002× | SQLite |
+| F (50% read, 50% rmw) | **717,024** | 167,292 | 4.29× | rustdb |
+
+**Analysis:**
+- **RustDB wins on reads (A, C, F)**: 4× faster than SQLite — in-memory B-Tree search has zero overhead vs SQLite's virtual machine
+- **SQLite wins on inserts (B, D)**: 4.5× faster — SQLite's page-based B-Tree handles insert load better than our in-memory node splitting
+- **SQLite crushes scans (E)**: 498× faster — SQLite has LIMIT pushdown; rustdb collects ALL row IDs then applies LIMIT
+- **Takeaway**: rustdb's B-Tree is competitive on point reads, but needs LIMIT pushdown and faster inserts to match SQLite across the board
+
+### Benchmark Dashboard
+
+See `benchmarks/index.html` for interactive charts showing progress over time.
+
+---
+
 ## 2026-07-23 — YCSB Benchmark (Phase 2: index-aware UPDATE, B-tree degree 32)
 
 **Commit:** `8481c97`

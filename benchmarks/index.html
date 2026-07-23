@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustdb Benchmarks</title>
+<!-- ponytail: chart.js from CDN, no build tools -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+h1 { color: #58a6ff; margin-bottom: .5rem; }
+.subtitle { color: #8b949e; margin-bottom: 2rem; }
+.chart-container { background: #161b22; border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem; }
+h2 { color: #c9d1d9; margin-bottom: 1rem; font-size: 1.1rem; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; }
+th, td { padding: .5rem .75rem; text-align: right; border-bottom: 1px solid #30363d; }
+th { color: #8b949e; font-size: .8rem; text-transform: uppercase; }
+td:first-child, th:first-child { text-align: left; }
+.rustdb { color: #58a6ff }
+.sqlite { color: #da3633 }
+</style>
+</head>
+<body>
+
+<h1>rustdb Benchmarks</h1>
+<p class="subtitle">YCSB ops/sec across versions, compared with SQLite</p>
+
+<div class="chart-container">
+  <h2>All Workloads — Ops/sec Over Time</h2>
+  <canvas id="chart"></canvas>
+</div>
+
+<div class="chart-container">
+  <h2>RustDB vs SQLite — Latest Run</h2>
+  <canvas id="compare" height="200"></canvas>
+</div>
+
+<div class="chart-container">
+  <h2>Read-Heavy Workloads (A, C, F)</h2>
+  <canvas id="readChart" height="200"></canvas>
+</div>
+
+<h2>RustDB Results</h2>
+<table id="results-table">
+  <thead>
+    <tr><th>Date</th><th>Commit</th><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th><th>F</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<h2>RustDB vs SQLite</h2>
+<table id="compare-table">
+  <thead>
+    <tr><th>Workload</th><th>RustDB</th><th>SQLite</th><th>Ratio</th></tr>
+  </thead>
+  <tbody id="compare-body"></tbody>
+</table>
+
+<script>
+const series = {
+  labels: ['Jun 20', 'Jun 25', 'Jul 23 (fix)', 'Jul 23 (phase 1)', 'Jul 23 (phase 2)'],
+  commits: ['ef62cd6', '2c0e1d7', '80c584d', '49e68f4', '8481c97'],
+  rustdb: [
+    { A: 44776,  B: 4529,  C: 286367, D: 5541,  E: 19,  F: 14830 },
+    { A: 505726, B: 56271, C: 807047, D: 56851, E: 44,  F: 82632 },
+    { A: 824410, B: 8365,  C: 671500, D: 7997,  E: 45,  F: 603478 },
+    { A: 996345, B: 9889,  C: 939063, D: 9745,  E: 53,  F: 643079 },
+    { A: 1100973,B: 48057, C: 917622, D: 48025, E: 62,  F: 717024 },
+  ],
+  sqlite: { A: 252994, B: 218886, C: 225724, D: 217757, E: 30908, F: 167292 },
+};
+
+const colors = {
+  A: '#58a6ff', B: '#da3633', C: '#3fb950', D: '#d29922', E: '#a371f7', F: '#db61a2'
+};
+
+function renderLineChart(canvasId, workloads, title) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  const datasets = workloads.map(w => ({
+    label: `Workload ${w}`,
+    data: series.rustdb.map(r => r[w]),
+    borderColor: colors[w],
+    backgroundColor: colors[w] + '20',
+    tension: 0.2,
+    pointRadius: 4,
+  }));
+  new Chart(ctx, {
+    type: 'line',
+    data: { labels: series.labels, datasets },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#c9d1d9' } } },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+        y: {
+          type: 'logarithmic',
+          ticks: { color: '#8b949e', callback: v => v >= 1000 ? (v/1000).toFixed(0) + 'K' : v },
+          grid: { color: '#30363d' },
+        },
+      },
+    },
+  });
+}
+
+function renderComparison() {
+  const ctx = document.getElementById('compare').getContext('2d');
+  const latest = series.rustdb[series.rustdb.length - 1];
+  const workloads = ['A', 'B', 'C', 'D', 'E', 'F'];
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: workloads.map(w => `Workload ${w}`),
+      datasets: [
+        { label: 'RustDB', data: workloads.map(w => latest[w]), backgroundColor: '#58a6ff' },
+        { label: 'SQLite', data: workloads.map(w => series.sqlite[w]), backgroundColor: '#da3633' },
+      ],
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { labels: { color: '#c9d1d9' } } },
+      scales: {
+        x: { ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+        y: { type: 'logarithmic', ticks: { color: '#8b949e', callback: v => v >= 1000 ? (v/1000).toFixed(0) + 'K' : v }, grid: { color: '#30363d' } },
+      },
+    },
+  });
+}
+
+// Results table
+const tbody = document.querySelector('#results-table tbody');
+for (let i = 0; i < series.labels.length; i++) {
+  const r = series.rustdb[i];
+  const row = tbody.insertRow();
+  row.innerHTML = `<td>${series.labels[i]}</td><td><code>${series.commits[i].slice(0,7)}</code></td>`;
+  for (const w of ['A','B','C','D','E','F']) {
+    row.innerHTML += `<td class="rustdb">${r[w].toLocaleString()}</td>`;
+  }
+}
+
+// Comparison table
+const compareBody = document.getElementById('compare-body');
+const latestRust = series.rustdb[series.rustdb.length - 1];
+for (const w of ['A','B','C','D','E','F']) {
+  const r = latestRust[w];
+  const s = series.sqlite[w];
+  const ratio = r / s;
+  const row = compareBody.insertRow();
+  row.innerHTML = `<td>Workload ${w}</td><td class="rustdb">${r.toLocaleString()}</td><td class="sqlite">${s.toLocaleString()}</td><td>${ratio.toFixed(2)}×</td>`;
+}
+
+renderLineChart('chart', ['A', 'B', 'C', 'D', 'E', 'F']);
+renderLineChart('readChart', ['A', 'C', 'F']);
+renderComparison();
+</script>
+</body>
+</html>

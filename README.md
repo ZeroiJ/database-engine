@@ -131,14 +131,44 @@ rustdb --help
 
 ---
 
-## Performance (benchmarked on 53k rows)
+## Benchmarks
 
-- **INSERT speed**: ~1,075,507 rows/sec (dev build, unoptimized)
-- **SELECT with index**: 0.0ms (instantaneous)
-- **SELECT full scan**: 45.7ms on 53k rows
-- **SELECT index scan**: 7.4ms (6x faster than full scan)
-- **SELECT range scan**: 25.6ms (2.5x faster than full scan)
-- **B-Tree depth**: 8-10 levels for 50k rows
+See [`benchmarks/index.html`](benchmarks/index.html) for interactive charts.
+
+[![Benchmarks](https://img.shields.io/badge/benchmarks-interactive-blue)](benchmarks/index.html)
+
+### YCSB — RustDB vs SQLite (10K records, in-memory)
+
+| Workload | RustDB | SQLite | RustDB wins |
+|----------|:-:|:-:|:-:|
+| A (50% read, 50% update) | **1,100,973** ops/sec | 252,994 | 4.4× faster |
+| B (95% read, 5% insert) | 48,057 ops/sec | **218,886** | — |
+| C (100% read) | **917,622** ops/sec | 225,724 | 4.1× faster |
+| D (95% read, 5% insert-latest) | 48,025 ops/sec | **217,757** | — |
+| E (95% scan, 5% insert) | 62 ops/sec | **30,908** | — |
+| F (50% read, 50% rmw) | **717,024** ops/sec | 167,292 | 4.3× faster |
+
+> **RustDB beats SQLite 4× on point reads/updates.** SQLite wins on inserts (better B-Tree write path) and scans (has LIMIT pushdown). See `BENCHMARKS.md` for full history.
+
+### Performance Progress
+
+| Version | A | B | C | D | E | F |
+|---------|:-:|:-:|:-:|:-:|:-:|:-:|
+| Initial (Jun 20) | 44,776 | 4,529 | 286,367 | 5,541 | 19 | 14,830 |
+| After indexes (Jun 25) | 505,726 | 56,271 | 807,047 | 56,851 | 44 | 82,632 |
+| B-Tree fix (Jul 23) | 824,410 | 8,365 | 671,500 | 7,997 | 45 | 603,478 |
+| Phase 1 (Jul 23) | 996,345 | 9,889 | 939,063 | 9,745 | 53 | 643,079 |
+| **Phase 2 (Jul 23)** | **1,100,973** | **48,057** | **917,622** | **48,025** | **62** | **717,024** |
+
+### Run Yourself
+
+```bash
+# RustDB benchmark
+cargo run --release --bin bench-ycsb
+
+# SQLite comparison (requires bundled SQLite)
+cargo run --release --bin bench-sqlite
+```
 
 ---
 
