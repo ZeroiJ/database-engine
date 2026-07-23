@@ -1,4 +1,4 @@
-use crate::btree::{BTree, Row};
+use crate::btree::{BTree, Row, BTREE_DEGREE};
 use crate::buffer::BufferPoolManager;
 use crate::catalog::{Catalog, TableMeta};
 use crate::disk::{DiskManager, RecordId};
@@ -134,7 +134,7 @@ impl Database {
         let table = Table {
             name: name.clone(),
             columns,
-            rows: BTree::new(2),
+            rows: BTree::new(BTREE_DEGREE),
             indexes: HashMap::new(),
             next_row_id: 1,
         };
@@ -197,7 +197,8 @@ impl Database {
             .position(|c| c.name == column)
             .ok_or_else(|| format!("Column '{}' not found in table", column))?;
 
-        let mut index_tree = IndexBTree::new(2);
+            let mut index_tree = IndexBTree::new(BTREE_DEGREE);
+
 
         for (row_id, row) in table.rows.inorder() {
             let col_value = row.get(col_idx).cloned().ok_or("Column value not found")?;
@@ -1369,7 +1370,8 @@ impl DiskDatabase {
         let primary_index = DiskBTree::new(self.buffer_pool.clone(), meta.index_root_page_id);
         let entries = primary_index.inorder();
 
-        let mut index_tree = IndexBTree::new(2);
+            let mut index_tree = IndexBTree::new(BTREE_DEGREE);
+
         for (row_id, _record_id) in &entries {
             if let Some((_rid, row)) = all_rows.iter().find(|(rid, _)| rid == _record_id) {
                 if let Some(col_val) = row.get(col_idx) {

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+pub const BTREE_DEGREE: usize = 32;
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct BTreeNode<V: Clone> {
     keys: Vec<i64>,
@@ -542,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_search() {
-        let mut btree = BTree::new(2);
+        let mut btree = BTree::new(BTREE_DEGREE);
 
         for i in 0..10 {
             btree.insert(i, make_row(i));
@@ -559,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_delete() {
-        let mut btree = BTree::new(2);
+        let mut btree = BTree::new(BTREE_DEGREE);
 
         for i in 0..10 {
             btree.insert(i, make_row(i));
@@ -579,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_inorder_sorted() {
-        let mut btree = BTree::new(2);
+        let mut btree = BTree::new(BTREE_DEGREE);
 
         let keys = vec![5, 3, 7, 1, 4, 6, 8, 2, 9, 0];
         for k in &keys {
@@ -598,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_balance_after_many_inserts() {
-        let mut btree = BTree::new(2);
+        let mut btree = BTree::new(BTREE_DEGREE);
 
         for i in 0..50 {
             btree.insert(i, make_row(i));
@@ -620,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_update_existing_key() {
-        let mut btree = BTree::new(2);
+        let mut btree = BTree::new(BTREE_DEGREE);
 
         btree.insert(1, make_row(1));
         btree.insert(2, make_row(2));
@@ -634,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_generic_int_btree() {
-        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        let mut btree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         btree.insert(10, vec![1, 2]);
         btree.insert(20, vec![3, 4, 5]);
         btree.insert(30, vec![6]);
@@ -665,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_generic_int_btree_delete() {
-        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        let mut btree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in 0..20 {
             btree.insert(i, vec![i * 10]);
         }
@@ -678,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_generic_int_btree_large() {
-        let mut btree: BTree<Vec<i64>> = BTree::new(2);
+        let mut btree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in 0..1000 {
             btree.insert(i, vec![i]);
         }
@@ -700,7 +702,7 @@ mod stress_tests {
 
     #[test]
     fn test_insert_search_100() {
-        let mut tree: BTree<Vec<i64>> = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in 0..100 {
             tree.insert(i, vec![]);
         }
@@ -711,7 +713,7 @@ mod stress_tests {
 
     #[test]
     fn test_delete_all() {
-        let mut tree: BTree<Vec<i64>> = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in 0..20 {
             tree.insert(i, vec![]);
         }
@@ -723,7 +725,7 @@ mod stress_tests {
 
     #[test]
     fn test_inorder_after_random_deletes() {
-        let mut tree: BTree<Vec<i64>> = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in [5, 3, 8, 1, 9, 2, 7, 4, 6, 0] {
             tree.insert(i, vec![]);
         }
@@ -735,7 +737,7 @@ mod stress_tests {
 
     #[test]
     fn test_depth_50k() {
-        let mut tree: BTree<Vec<i64>> = BTree::new(2);
+        let mut tree: BTree<Vec<i64>> = BTree::new(BTREE_DEGREE);
         for i in 0..50000 {
             tree.insert(i, vec![]);
         }
