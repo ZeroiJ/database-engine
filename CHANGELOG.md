@@ -11,7 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### B-Tree Secondary Indexes + Hash Fix
+#### Planner Index Detection + Multi-Column SELECT + Directed Range Scans
+- **Directed B-Tree range scans** (Phase 1 #1): Replaced `inorder()`+slice with `inorder_from_node`/`inorder_range_node` — directed traversal skips subtrees outside the range
+  - `range_from(start_key)`: O(log N + K) instead of O(N) — skips keys < start_key at each level
+  - `range_to(end_key)`: Early-stop traversal — stops recursing once keys exceed end_key
+  - `inorder_range(lower, upper)`: Combined lower+upper bound directed traversal
+  - `range_gt(start_key)`: Delegates to `range_from(start_key + 1)`
+  - YCSB impact: +7% to +40% across all workloads (read-heavy: +40%)
+- **Multi-column SELECT** (Phase 1 #2): Parser now handles `SELECT col1, col2, ...` instead of only `SELECT *` or `SELECT col`
+  - Loops on Comma tokens to collect multiple column identifiers
+- **Planner index detection** (Phase 1 #3): EXPLAIN now shows `INDEX_SCAN` or `INDEX_RANGE_SCAN` when a matching index exists for the WHERE column
+  - Added `table` field to `Index` struct for table→index mapping
+  - Added `DiskDatabase::get_index_for_column()` to query index info
+  - Range scans estimate ~50% of rows, equality scans estimate ~1 row
+- **YCSB benchmark**: All 6 YCSB workloads now complete cleanly (BTree::delete fixed)
+  - Comparison table in BENCHMARKS.md tracks progress across versions
+
+### Fixed
+
+- **BTree::delete() return value propagation**: Recursive `delete_from_tree` calls now propagate their `bool` return value instead of returning `true` unconditionally
+  - Root node is promoted (first child becomes new root) when root empties after deletion
+  - Empty root check occurs before returning from `delete()`
+  - 111 tests pass
 - **Genericized BTree<V>**: BTree now supports arbitrary value types via type parameter (default `Row`)
   - Enables `BTree<Vec<i64>>` for secondary index storage
   - Added `range_from`, `range_gt`, `range_to` methods for O(log N + K) range scans
