@@ -33,8 +33,6 @@ pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
 
     let total_rows = db.get_table_row_count(&table);
 
-    // Note: Secondary indexes are not yet supported in DiskDatabase,
-    // so we always do a FullScan for now.
     let (scan_type, estimated_rows, condition_str) = match &condition {
         Some(WhereClause::Single(cond)) => {
             let op_str = match cond.operator {
@@ -43,7 +41,28 @@ pub fn plan(db: &Database, stmt: &Statement) -> Option<QueryPlan> {
                 Operator::Lt => "<",
             };
             let cond_str = format!("{} {} {}", cond.column, op_str, value_str(&cond.value));
-            (ScanType::FullScan, total_rows, Some(cond_str))
+
+            // Check for matching index
+            if let Some((idx_name, _)) = db.get_index_for_column(&table, &cond.column) {
+                // Estimate: range scans return ~50% of rows (pessimistic), equality returns ~1 row
+                let est = match cond.operator {
+                    Operator::Gt | Operator::Lt => total_rows / 2,
+                    _ => 1.min(total_rows),
+                };
+                let scan = match cond.operator {
+                    Operator::Gt | Operator::Lt => ScanType::IndexRangeScan {
+                        index_name: idx_name.to_string(),
+                        column: cond.column.clone(),
+                    },
+                    _ => ScanType::IndexScan {
+                        index_name: idx_name.to_string(),
+                        column: cond.column.clone(),
+                    },
+                };
+                (scan, est, Some(cond_str))
+            } else {
+                (ScanType::FullScan, total_rows, Some(cond_str))
+            }
         }
         Some(WhereClause::And(left, right)) => {
             let left_str = where_clause_to_string(left);

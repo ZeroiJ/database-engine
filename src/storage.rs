@@ -19,6 +19,7 @@ pub type IndexBTree = BTree<Vec<i64>>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Index {
     pub name: String,
+    pub table: String,
     pub column: String,
     pub tree: IndexBTree,
 }
@@ -211,10 +212,12 @@ impl Database {
             }
         }
 
+        let table_name = table.name.clone();
         table.indexes.insert(
             index_name.clone(),
             Index {
                 name: index_name.clone(),
+                table: table_name,
                 column,
                 tree: index_tree,
             },
@@ -1369,6 +1372,7 @@ impl DiskDatabase {
             index_name.clone(),
             Index {
                 name: index_name,
+                table: table.clone(),
                 column,
                 tree: index_tree,
             },
@@ -1382,6 +1386,15 @@ impl DiskDatabase {
             return Err(format!("Index '{}' not found", index_name));
         }
         Ok(())
+    }
+
+    pub fn get_index_for_column(&self, table: &str, column: &str) -> Option<(&str, &str)> {
+        for idx in self.secondary_indexes.values() {
+            if idx.table == table && idx.column == column {
+                return Some((&idx.name, &idx.column));
+            }
+        }
+        None
     }
 }
 
