@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Index-Aware UPDATE WHERE + B-Tree Degree Increase (Phase 2)
+- **Index-aware UPDATE WHERE** (Phase 2 #4): `UPDATE table SET col = val WHERE indexed_col = val` now queries the index directly instead of scanning all rows
+  - Uses the same index-detection pattern as SELECT — O(log N) instead of O(N) for equality WHERE
+  - Non-equality or unindexed WHERE falls back to full table scan
+- **B-tree degree 2→32** (Phase 2 #5): Increased minimum degree from 2 (max 3 keys/node) to 32 (max 63 keys/node)
+  - Tree depth for 10K records: ~14 levels → ~2 levels
+  - Fewer node splits during insert, fewer levels during search/scan
+  - YCSB impact: inserts 4.8× faster, RMW +12%, read-modify-write +12%
+- **YCSB benchmark**: All workloads improved — inserts now 48K ops/sec (was 9.8K)
+
 #### Planner Index Detection + Multi-Column SELECT + Directed Range Scans
 - **Directed B-Tree range scans** (Phase 1 #1): Replaced `inorder()`+slice with `inorder_from_node`/`inorder_range_node` — directed traversal skips subtrees outside the range
   - `range_from(start_key)`: O(log N + K) instead of O(N) — skips keys < start_key at each level

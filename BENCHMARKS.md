@@ -4,9 +4,46 @@ Record of all benchmark runs over time. Add new entries at the top.
 
 ---
 
-## 2026-07-23 — YCSB Benchmark (Phase 1: directed scans, multi-col SELECT, planner)
+## 2026-07-23 — YCSB Benchmark (Phase 2: index-aware UPDATE, B-tree degree 32)
 
-**Commit:** `49e68f4`
+**Commit:** `8481c97`
+**Build:** `cargo build --release`
+**Hardware:** AMD Ryzen 5 5600H (6C/12T, 3.99 GHz), 15 GB RAM
+**OS:** Arch Linux 7.0.9, x86_64
+**Standard:** Yahoo! Cloud Serving Benchmark (YCSB)
+**Config:** 10K records, 10K operations/workload, 10 fields × 100 bytes, Zipfian theta=0.99
+
+### Workload Results
+
+| Workload | Description | ops/sec | Time | Notes |
+|----------|-------------|---------|------|-------|
+| **A** | 50% read, 50% update | **1,100,973** | 0.01s | Read + index-aware update |
+| **B** | 95% read, 5% insert | **48,057** | 0.21s | Read fast, insert no longer as slow |
+| **C** | 100% read | **917,622** | 0.01s | Shallower B-tree (t=32 vs t=2) |
+| **D** | 95% read, 5% insert-latest | **48,025** | 0.21s | Similar to B |
+| **E** | 95% scan, 5% insert | **62** | 160.84s | Range scans still need LIMIT pushdown |
+| **F** | 50% read, 50% read-modify-write | **717,024** | 0.01s | Index-aware RMW |
+
+
+### Comparison with previous run
+
+| Workload | Before (49e68f4) | After (8481c97) | Δ |
+|----------|:-:|:-:|:-:|
+| A | 996,345 | **1,100,973** | +11% |
+| B | 9,889 | **48,057** | +386% |
+| C | 939,063 | **917,622** | -2% |
+| D | 9,745 | **48,025** | +393% |
+| E | 53 | **62** | +17% |
+| F | 643,079 | **717,024** | +12% |
+
+### Analysis
+
+- **Phase 2 changes**: index-aware `UPDATE WHERE col = val` (uses index instead of full scan), B-tree degree t=2→32
+- **Massive insert improvement**: B/D workloads 4.8× faster — larger B-tree fanout means fewer node splits during insert
+- **Read-modify-write (F)**: 643K→717K ops/sec (+12%) — index-aware update + shallower tree
+- **Read-heavy (C)**: negligible change (-2%) — single-key reads already were O(log n), just fewer levels now
+- **Workload E still slow**: range scan is bounded by collecting all row IDs before applying LIMIT
+- **Index-aware UPDATE**: `db.update()` now queries the index directly instead of scanning all rows, making it practical for the real update path
 **Build:** `cargo build --release`
 **Hardware:** AMD Ryzen 5 5600H (6C/12T, 3.99 GHz), 15 GB RAM
 **OS:** Arch Linux 7.0.9, x86_64
