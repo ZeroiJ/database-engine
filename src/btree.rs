@@ -442,25 +442,70 @@ impl<V: Clone> BTree<V> {
         }
     }
 
-    /// Returns an iterator over entries where key >= start_key.
+    /// Returns entries with key >= start_key using directed traversal.
+    /// O(log N + K) instead of O(N) — skips subtrees where all keys < start_key.
     pub fn range_from(&self, start_key: i64) -> Vec<(i64, V)> {
-        let all = self.inorder();
-        let start = all.partition_point(|(k, _)| *k < start_key);
-        all[start..].to_vec()
+        let mut result = Vec::new();
+        self.inorder_from_node(self.root, start_key, &mut result);
+        result
     }
 
-    /// Returns an iterator over entries where key > start_key (exclusive).
+    /// Returns entries with key > start_key.
     pub fn range_gt(&self, start_key: i64) -> Vec<(i64, V)> {
-        let all = self.inorder();
-        let start = all.partition_point(|(k, _)| *k <= start_key);
-        all[start..].to_vec()
+        self.range_from(start_key + 1)
     }
 
-    /// Returns an iterator over entries where key < end_key.
+    /// Returns entries with key < end_key using early-stop traversal.
+    /// Stops recursing once all remaining keys reach end_key.
     pub fn range_to(&self, end_key: i64) -> Vec<(i64, V)> {
-        let all = self.inorder();
-        let end = all.partition_point(|(k, _)| *k < end_key);
-        all[..end].to_vec()
+        let mut result = Vec::new();
+        self.inorder_range_node(self.root, i64::MIN, end_key, &mut result);
+        result
+    }
+
+    /// Returns entries with lower <= key <= upper using directed traversal.
+    pub fn inorder_range(&self, lower: i64, upper: i64) -> Vec<(i64, V)> {
+        let mut result = Vec::new();
+        if upper < i64::MAX {
+            // Convert inclusive upper to exclusive bound
+            self.inorder_range_node(self.root, lower, upper + 1, &mut result);
+        } else {
+            result = self.range_from(lower);
+        }
+        result
+    }
+
+    fn inorder_from_node(&self, idx: usize, start_key: i64, result: &mut Vec<(i64, V)>) {
+        let node = &self.nodes[idx];
+        let start = node.keys.partition_point(|k| *k < start_key);
+        for i in start..node.keys.len() {
+            if !node.leaf && i < node.children.len() {
+                self.inorder_from_node(node.children[i], start_key, result);
+            }
+            result.push((node.keys[i].clone(), node.values[i].clone()));
+        }
+        if !node.leaf && !node.children.is_empty() {
+            self.inorder_from_node(*node.children.last().unwrap(), start_key, result);
+        }
+    }
+
+    fn inorder_range_node(&self, idx: usize, lower: i64, upper_excl: i64, result: &mut Vec<(i64, V)>) {
+        let node = &self.nodes[idx];
+        let start = node.keys.partition_point(|k| *k < lower);
+        for i in start..node.keys.len() {
+            if !node.leaf && i < node.children.len() {
+                self.inorder_range_node(node.children[i], lower, upper_excl, result);
+            }
+            if node.keys[i] >= upper_excl {
+                return;
+            }
+            result.push((node.keys[i].clone(), node.values[i].clone()));
+        }
+        if !node.leaf && !node.children.is_empty() {
+            if node.keys.last().map_or(true, |k| *k < upper_excl) {
+                self.inorder_range_node(*node.children.last().unwrap(), lower, upper_excl, result);
+            }
+        }
     }
 
     pub fn depth(&self) -> usize {
