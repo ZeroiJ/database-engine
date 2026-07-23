@@ -4,6 +4,37 @@ Record of all benchmark runs over time. Add new entries at the top.
 
 ---
 
+## 2026-07-23 — YCSB Benchmark (Release, fixed BTree::delete)
+
+**Commit:** `80c584d`
+**Build:** `cargo build --release`
+**Hardware:** AMD Ryzen 5 5600H (6C/12T, 3.99 GHz), 15 GB RAM
+**OS:** Arch Linux 7.0.9, x86_64
+**Standard:** Yahoo! Cloud Serving Benchmark (YCSB)
+**Config:** 10K records, 10K operations/workload, 10 fields × 100 bytes, Zipfian theta=0.99
+
+### Workload Results
+
+| Workload | Description | ops/sec | Time | Notes |
+|----------|-------------|---------|------|-------|
+| **A** | 50% read, 50% update | **824,410** | 0.01s | Direct B-Tree overwrite (bypasses delete+insert) |
+| **B** | 95% read, 5% insert | **8,365** | 1.20s | Read fast, insert slow (index maintenance) |
+| **C** | 100% read | **671,500** | 0.01s | Pure indexed reads |
+| **D** | 95% read, 5% insert-latest | **7,997** | 1.25s | Similar to B |
+| **E** | 95% scan, 5% insert | **45** | 223.20s | Range scans very slow (full BTree traversal) |
+| **F** | 50% read, 50% read-modify-write | **603,478** | 0.02s | Read + direct overwrite |
+
+### Analysis
+
+- **`BTree::delete()` fixed** — no panics, all workloads complete cleanly
+- **Reads still fast**: 671K-824K ops/sec with indexed equality lookups
+- **Inserts still bottleneck**: ~8K ops/sec — index maintenance + string allocation
+- **Scans still slow**: 45 ops/sec — range queries O(N) instead of O(log N + K)
+- **Update path still bypassed**: do_update/do_rmw use direct B-Tree overwrite; `db.update()` needs index-aware WHERE clause filtering
+- **B/D workloads improved**: 7-8K ops/sec vs 4.6-5.5K from previous run (better condition or reduced overhead)
+
+---
+
 ## 2026-06-20 — YCSB Benchmark (Release Mode)
 
 **Commit:** `ef62cd6`
