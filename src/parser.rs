@@ -121,7 +121,18 @@ fn parse_select(
 ) -> Result<Statement, String> {
     let columns = match tokens.next() {
         Some(Token::Star) => vec!["*".to_string()],
-        Some(Token::Ident(name)) => vec![name],
+        Some(Token::Ident(name)) => {
+            let mut cols = vec![name];
+            while let Some(&Token::Comma) = tokens.peek() {
+                tokens.next();
+                match tokens.next() {
+                    Some(Token::Ident(n)) => cols.push(n),
+                    Some(tok) => return Err(format!("Expected column name after comma, got: {:?}", tok)),
+                    None => return Err("Unexpected end of input after comma".to_string()),
+                }
+            }
+            cols
+        }
         Some(tok) => return Err(format!("Expected column or *, got: {:?}", tok)),
         None => return Err("Unexpected end of input".to_string()),
     };
