@@ -185,31 +185,25 @@ impl<V: Clone> BTree<V> {
     }
 
     pub fn delete(&mut self, key: i64) -> bool {
-        if self.search(key).is_none() {
-            return false;
-        }
-        self.delete_from_tree(self.root, key);
-
-        // Handle root becoming empty - promote first child
-        if self.nodes[self.root].keys.is_empty() && !self.nodes[self.root].leaf {
-            if !self.nodes[self.root].children.is_empty() {
-                let new_root = self.nodes[self.root].children[0];
-                self.nodes[self.root] = self.nodes[new_root].clone();
+        if self.delete_from_tree(self.root, key) {
+            // Handle root becoming empty - promote first child if not leaf
+            if self.nodes[self.root].keys.is_empty() && !self.nodes[self.root].leaf {
+                if !self.nodes[self.root].children.is_empty() {
+                    let new_root = self.nodes[self.root].children[0];
+                    self.nodes[self.root] = self.nodes[new_root].clone();
+                }
             }
-        }
 
-        // Also handle the case where root becomes empty leaf
-        if self.nodes[self.root].keys.is_empty() && self.nodes[self.root].leaf {
-            // Root is empty leaf - tree is now empty, that's ok
+            true
+        } else {
+            false
         }
-
-        true
     }
 
-    fn delete_from_tree(&mut self, idx: usize, key: i64) {
+    fn delete_from_tree(&mut self, idx: usize, key: i64) -> bool {
         // Handle empty node case
         if self.nodes[idx].keys.is_empty() {
-            return;
+            return false;
         }
 
         let mut i = 0;
@@ -230,7 +224,7 @@ impl<V: Clone> BTree<V> {
             if is_leaf {
                 self.nodes[idx].keys.remove(i);
                 self.nodes[idx].values.remove(i);
-                return;
+                return true;
             }
 
             // Check bounds before accessing children
@@ -244,24 +238,24 @@ impl<V: Clone> BTree<V> {
                     let (pred_key, pred_val) = self.find_predecessor(left_child);
                     self.nodes[idx].keys[i] = pred_key;
                     self.nodes[idx].values[i] = pred_val;
-                    self.delete_from_tree(left_child, pred_key);
+                    return self.delete_from_tree(left_child, pred_key);
                 } else if self.nodes[right_child].keys.len() >= self.t {
                     let (succ_key, succ_val) = self.find_successor(right_child);
                     self.nodes[idx].keys[i] = succ_key;
                     self.nodes[idx].values[i] = succ_val;
-                    self.delete_from_tree(right_child, succ_key);
+                    return self.delete_from_tree(right_child, succ_key);
                 } else {
                     self.merge_nodes(idx, i);
                     let new_left_child = self.nodes[idx].children[i];
-                    self.delete_from_tree(new_left_child, key);
+                    return self.delete_from_tree(new_left_child, key);
                 }
             } else {
                 // Only one child, can't merge or borrow
-                return;
+                return false;
             }
         } else {
             if self.nodes[idx].leaf {
-                return;
+                return false;
             }
 
             let child_idx = {
@@ -275,7 +269,7 @@ impl<V: Clone> BTree<V> {
 
             // Ensure child_idx is valid
             if child_idx >= self.nodes[idx].children.len() {
-                return;
+                return false;
             }
 
             let child = self.nodes[idx].children[child_idx];
@@ -295,21 +289,18 @@ impl<V: Clone> BTree<V> {
 
                 if new_child_idx < self.nodes[idx].children.len() {
                     let new_child = self.nodes[idx].children[new_child_idx];
-                    self.delete_from_tree(new_child, key);
+                    return self.delete_from_tree(new_child, key);
                 }
             } else {
-                self.delete_from_tree(child, key);
+                return self.delete_from_tree(child, key);
             }
         }
 
-        // Shrink root if needed
-        if self.nodes[idx].keys.is_empty() && !self.nodes[idx].leaf && idx != self.root {
-            if !self.nodes[idx].children.is_empty() {
-                let child = self.nodes[idx].children[0];
-                self.nodes[idx] = self.nodes[child].clone();
-            }
-        }
+        // Return false if key not found or couldn't delete
+        return false;
     }
+
+
 
     fn find_predecessor(&self, idx: usize) -> (i64, V) {
         let mut current = idx;
@@ -441,7 +432,7 @@ impl<V: Clone> BTree<V> {
     fn inorder_node(&self, idx: usize, result: &mut Vec<(i64, V)>) {
         let node = &self.nodes[idx];
         for i in 0..node.keys.len() {
-            if !node.leaf {
+            if !node.leaf && i < node.children.len() {
                 self.inorder_node(node.children[i], result);
             }
             result.push((node.keys[i].clone(), node.values[i].clone()));
