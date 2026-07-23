@@ -11,6 +11,7 @@ pub mod storage;
 pub mod table_heap;
 pub mod table_page;
 pub mod wal;
+pub mod ycsb_core;
 
 pub use buffer::BufferPoolManager;
 pub use disk::{Page, PageId, RecordId, PAGE_SIZE};
