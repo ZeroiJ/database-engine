@@ -693,19 +693,36 @@ impl Database {
         }
 
         let columns = table.columns.clone();
-        let all_rows = table.rows.inorder();
 
-        let keys_to_update: Vec<i64> = all_rows
-            .iter()
-            .filter(|(_, row)| {
-                if let Some(ref cond) = condition {
-                    Self::evaluate_where_static(row, &columns, cond)
-                } else {
-                    true
+        // ponytail: index lookup avoids full scan for equality WHERE
+        let keys_to_update: Vec<i64> = 'search: {
+            if let Some(ref cond) = condition {
+                if let WhereClause::Single(c) = cond {
+                    if c.operator == Operator::Eq {
+                        if let Some(index) =
+                            table.indexes.values().find(|i| i.column == c.column)
+                        {
+                            let idx_key = Self::value_to_index_key(&c.value);
+                            break 'search index.tree.search(idx_key).unwrap_or_default();
+                        }
+                    }
                 }
-            })
-            .map(|(key, _)| *key)
-            .collect();
+            }
+            // Fallback: full table scan
+            table
+                .rows
+                .inorder()
+                .iter()
+                .filter(|(_, row)| {
+                    if let Some(ref cond) = condition {
+                        Self::evaluate_where_static(row, &columns, cond)
+                    } else {
+                        true
+                    }
+                })
+                .map(|(key, _)| *key)
+                .collect()
+        };
 
         let count = keys_to_update.len();
 
